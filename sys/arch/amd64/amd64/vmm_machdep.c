@@ -6926,7 +6926,17 @@ vmm_alloc_vpid_vcpu(uint16_t *vpid, struct vcpu *vcpu)
 	struct vmm_softc *sc = vmm_softc;
 
 	rw_enter_write(&vmm_softc->vpid_lock);
-	if (vcpu == NULL || vcpu->vc_seves || amd64_min_noes_asid == 0)
+	if (vcpu == NULL || vcpu->vc_seves)
+		minasid = 1;
+	else if (vcpu->vc_sev && amd64_min_noes_asid != 0)
+		minasid = amd64_min_noes_asid;
+	else if (!vcpu->vc_sev && amd64_num_sev_asids != 0) {
+		if (amd64_num_sev_asids < sc->max_vpid)
+			minasid = amd64_num_sev_asids + 1;
+		else
+			minasid = sc->max_vpid + 1;
+	}
+	else if (amd64_min_noes_asid == 0)
 		minasid = 1;
 	else
 		minasid = amd64_min_noes_asid;
