@@ -621,6 +621,13 @@ inc_refs(struct qcdisk *disk, off_t off, int newcluster)
 		buf = htobe64(l2cluster);
 		if (pwrite(disk->fd, &buf, sizeof(buf), l1off) != 8)
 			fatal("%s: failed to write ref block", __func__);
+		/*
+		 * The newly allocated refcount block cluster must itself
+		 * be marked in use, or qcow2 metadata leaks one cluster
+		 * per refcount block (one per 2 GiB of allocated data at
+		 * the default 64K cluster / 16-bit refcount sizing).
+		 */
+		inc_refs(disk, l2cluster, 1);
 	}
 
 	refs = 1;
