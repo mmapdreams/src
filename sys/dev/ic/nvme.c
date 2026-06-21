@@ -304,6 +304,8 @@ nvme_attach(struct nvme_softc *sc)
 	u_int64_t cap;
 	u_int32_t reg;
 	u_int nccbs = 0;
+	u_int ioq_entries;
+	int rv;
 
 	mtx_init(&sc->sc_ccb_mtx, IPL_BIO);
 	rw_init(&sc->sc_lock, "nvme_lock");
@@ -374,14 +376,36 @@ nvme_attach(struct nvme_softc *sc)
 	}
 	nccbs = 64;
 
-	sc->sc_q = nvme_q_alloc(sc, NVME_IO_Q, 128, sc->sc_dstrd);
+	/*
+	 * Clamp the IO queue size to the controller's maximum (MQES).  The
+	 * AWS EBS NVMe controller exposed on EC2 "Nitro" instances reports an
+	 * MQES below the 128 entries used unconditionally otherwise, and
+	 * rejects CREATE IO {COMPLETION,SUBMISSION} QUEUE with "invalid queue
+	 * size" (status 0x02) when asked for more than it supports.
+	 */
+	ioq_entries = NVME_CAP_MQES(cap);
+	if (ioq_entries > 128)
+		ioq_entries = 128;
+
+	/*
+	 * Never allow more commands in flight than the IO submission queue
+	 * has slots for (it is full at q_entries - 1).  Without this, a
+	 * controller advertising a small MQES (as AWS EBS does on EC2) would
+	 * let the SCSI layer overrun the ring and the device would complete
+	 * stale entries, faulting in sd_buf_done().
+	 */
+	if (sc->sc_openings > ioq_entries - 1)
+		sc->sc_openings = ioq_entries - 1;
+
+	sc->sc_q = nvme_q_alloc(sc, NVME_IO_Q, ioq_entries, sc->sc_dstrd);
 	if (sc->sc_q == NULL) {
 		printf("%s: unable to allocate io q\n", DEVNAME(sc));
 		goto disable;
 	}
 
-	if (nvme_q_create(sc, sc->sc_q) != 0) {
-		printf("%s: unable to create io q\n", DEVNAME(sc));
+	if ((rv = nvme_q_create(sc, sc->sc_q)) != 0) {
+		printf("%s: unable to create io q, status 0x%04x\n",
+		    DEVNAME(sc), rv);
 		goto free_q;
 	}
 
