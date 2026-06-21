@@ -854,6 +854,13 @@ device  mcx: ether, ifnet, ifmedia, intrmap, stoeplitz
 attach  mcx at pci
 file    dev/pci/if_mcx.c                mcx
 
+# Amazon Elastic Network Adapter
+device	ena: ether, ifnet, ifmedia, intrmap, stoeplitz
+attach	ena at pci
+file	dev/pci/if_ena.c			ena
+file	dev/pci/ena-com/ena_com.c		ena
+file	dev/pci/ena-com/ena_eth_com.c		ena
+
 # Intel Adaptive Virtual Function
 device	iavf: ether, ifnet, ifmedia
 attach	iavf at pci

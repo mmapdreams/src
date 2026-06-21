@@ -267,6 +267,7 @@ bnxt*		at pci?			# Broadcom BCM573xx, BCM574xx
 bwfm*		at pci?			# Broadcom FullMAC
 ixl*		at pci?			# Intel Ethernet 700 Series
 mcx*		at pci?			# Mellanox ConnectX-4
+ena*		at pci?			# Amazon Elastic Network Adapter
 iavf*		at pci?			# Intel Ethernet Adaptive VF
 aq*		at pci?			# Aquantia aQtion Ethernet
 igc*		at pci?			# Intel I225 Ethernet

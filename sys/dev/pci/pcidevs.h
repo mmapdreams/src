@@ -351,6 +351,7 @@
 #define	PCI_VENDOR_SKHYNIX	0x1c5c		/* SK hynix */
 #define	PCI_VENDOR_ADATA	0x1cc1		/* ADATA Technology */
 #define	PCI_VENDOR_UMIS	0x1cc4		/* Union Memory */
+#define	PCI_VENDOR_AMAZON	0x1d0f		/* Amazon */
 #define	PCI_VENDOR_ZHAOXIN	0x1d17		/* Zhaoxin */
 #define	PCI_VENDOR_BAIKAL	0x1d39		/* Baikal Electronics */
 #define	PCI_VENDOR_AQUANTIA	0x1d6a		/* Aquantia */
@@ -699,6 +700,12 @@
 #define	PCI_PRODUCT_ALTIMA_AC1001	0x03e9		/* AC1001 */
 #define	PCI_PRODUCT_ALTIMA_AC9100	0x03ea		/* AC9100 */
 #define	PCI_PRODUCT_ALTIMA_AC1003	0x03eb		/* AC1003 */
+
+/* Amazon products */
+#define	PCI_PRODUCT_AMAZON_ENA_PF	0x0ec2		/* ENA PF */
+#define	PCI_PRODUCT_AMAZON_ENA_PF_RSERV0	0x1ec2		/* ENA PF */
+#define	PCI_PRODUCT_AMAZON_ENA_VF	0xec20		/* ENA VF */
+#define	PCI_PRODUCT_AMAZON_ENA_VF_RSERV0	0xec21		/* ENA VF */
 
 /* Applied Micro Circuits products */
 #define	PCI_PRODUCT_AMCIRCUITS_S5933	0x4750		/* S5933 PCI Matchmaker */

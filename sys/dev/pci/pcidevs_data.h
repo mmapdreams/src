@@ -1036,6 +1036,22 @@ static const struct pci_known_product pci_known_products[] = {
 	    "AC1003",
 	},
 	{
+	    PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_ENA_PF,
+	    "ENA PF",
+	},
+	{
+	    PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_ENA_PF_RSERV0,
+	    "ENA PF",
+	},
+	{
+	    PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_ENA_VF,
+	    "ENA VF",
+	},
+	{
+	    PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_ENA_VF_RSERV0,
+	    "ENA VF",
+	},
+	{
 	    PCI_VENDOR_AMCIRCUITS, PCI_PRODUCT_AMCIRCUITS_S5933,
 	    "S5933 PCI Matchmaker",
 	},
@@ -39294,6 +39310,10 @@ static const struct pci_known_vendor pci_known_vendors[] = {
 	{
 	    PCI_VENDOR_UMIS,
 	    "Union Memory",
+	},
+	{
+	    PCI_VENDOR_AMAZON,
+	    "Amazon",
 	},
 	{
 	    PCI_VENDOR_ZHAOXIN,

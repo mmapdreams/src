@@ -31,6 +31,8 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
+#include <dev/pv/pvreg.h>
+
 /* 33DB4D5B-1FF7-401C-9657-7441C03DD766 */
 #define ACPI_PCI_UUID \
   { 0x5b, 0x4d, 0xdb, 0x33, \
@@ -170,6 +172,35 @@ acpipci_attach(struct device *parent, struct device *self, void *aux)
 #endif
 }
 
+/*
+ * Detect a KVM hypervisor via the CPUID hypervisor signature.  Used to allow
+ * MSI on the QEMU/KVM i440fx machine (as presented by AWS EC2 "Nitro" guests
+ * booted in legacy-BIOS mode), which advertises ACPI 1.0 and would otherwise
+ * have MSI disabled.
+ */
+static int
+acpipci_msi_kvm(void)
+{
+	uint32_t base, reg0;
+	union {
+		uint32_t	regs[3];
+		char		str[CPUID_HV_SIGNATURE_STRLEN];
+	} r;
+
+	if ((cpu_ecxfeature & CPUIDECX_HV) == 0)
+		return (0);
+
+	for (base = CPUID_HV_SIGNATURE_START; base < CPUID_HV_SIGNATURE_END;
+	    base += CPUID_HV_SIGNATURE_STEP) {
+		CPUID(base, reg0, r.regs[0], r.regs[1], r.regs[2]);
+		if (memcmp(r.str, "KVMKVMKVM\0\0\0",
+		    CPUID_HV_SIGNATURE_STRLEN) == 0)
+			return (1);
+	}
+
+	return (0);
+}
+
 void
 acpipci_attach_bus(struct device *parent, struct acpipci_softc *sc)
 {
@@ -194,11 +225,11 @@ acpipci_attach_bus(struct device *parent, struct acpipci_softc *sc)
 	    (sc->sc_acpi->sc_fadt->iapc_boot_arch & FADT_NO_MSI) == 0)
 		pba.pba_flags |= PCI_FLAGS_MSI_ENABLED;
 
-	/* Enable MSI for QEMU claiming ACPI 1.0 */
+	/* Enable MSI for QEMU/KVM claiming ACPI 1.0 (e.g. EC2 legacy-BIOS) */
 	tag = pci_make_tag(pba.pba_pc, sc->sc_bus, 0, 0);
 	id = pci_conf_read(pba.pba_pc, tag, PCI_SUBSYS_ID_REG);
 	if (sc->sc_acpi->sc_fadt->hdr.revision == 1 &&
-	    PCI_VENDOR(id) == PCI_VENDOR_QUMRANET)
+	    (PCI_VENDOR(id) == PCI_VENDOR_QUMRANET || acpipci_msi_kvm()))
 		pba.pba_flags |= PCI_FLAGS_MSI_ENABLED;
 
 	/*

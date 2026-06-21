@@ -346,6 +346,7 @@ vendor	SYMPHONY2	0x1c1c	Symphony Labs
 vendor	SKHYNIX		0x1c5c	SK hynix
 vendor	ADATA		0x1cc1	ADATA Technology
 vendor	UMIS		0x1cc4	Union Memory
+vendor	AMAZON		0x1d0f	Amazon
 vendor	ZHAOXIN		0x1d17	Zhaoxin
 vendor	BAIKAL		0x1d39	Baikal Electronics
 vendor	AQUANTIA	0x1d6a	Aquantia
@@ -694,6 +695,12 @@ product ALTIMA AC1000		0x03e8	AC1000
 product ALTIMA AC1001		0x03e9	AC1001
 product ALTIMA AC9100		0x03ea	AC9100
 product ALTIMA AC1003		0x03eb	AC1003
+
+/* Amazon products */
+product AMAZON ENA_PF		0x0ec2	ENA PF
+product AMAZON ENA_PF_RSERV0	0x1ec2	ENA PF
+product AMAZON ENA_VF		0xec20	ENA VF
+product AMAZON ENA_VF_RSERV0	0xec21	ENA VF
 
 /* Applied Micro Circuits products */
 product AMCIRCUITS S5933	0x4750	S5933 PCI Matchmaker

@@ -327,6 +327,7 @@ ix*		at pci?			# Intel 82598EB 10Gb Ethernet
 ixl*		at pci?			# Intel Ethernet 700 Series
 ice*		at pci?			# Intel Ethernet 800 Series
 mcx*		at pci?			# Mellanox ConnectX-4/5 Ethernet
+ena*		at pci?			# Amazon Elastic Network Adapter
 mskc*		at pci?			# Marvell Yukon-2
 msk*		at mskc?		#  each port of above
 re*		at pci?			# Realtek 8169/8169S/8110S

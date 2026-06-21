@@ -30,6 +30,8 @@
 #include <dev/ic/pluartvar.h>
 #include <dev/cons.h>
 
+extern bus_space_handle_t pluartconsioh;
+
 struct pluart_acpi_softc {
 	struct pluart_softc sc;
 	struct acpi_softc *sc_acpi;
@@ -47,6 +49,7 @@ const struct cfattach pluart_acpi_ca = {
 
 const char *pluart_hids[] = {
 	"ARMH0011",
+	"ARMH0061",	/* ARM SBSA Generic UART */
 	NULL
 };
 
@@ -68,6 +71,7 @@ pluart_acpi_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct pluart_acpi_softc *sc = (struct pluart_acpi_softc *)self;
 	struct acpi_attach_args *aaa = aux;
+	int console;
 
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
@@ -93,7 +97,21 @@ pluart_acpi_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc.sc_hwflags |= COM_HW_SBSA;
 
-	pluart_attach_common(&sc->sc, pluart_acpi_is_console(sc));
+	console = pluart_acpi_is_console(sc);
+	if (!console && pluartconsioh == 0 && sc->sc.sc_dev.dv_unit == 0) {
+		/*
+		 * No serial console was set up by the early console code.
+		 * This happens on AWS Graviton (ACPI boot), where the SPCR
+		 * console UART has no ACPI namespace device, so /dev/console
+		 * would have no backing device and init(8) cannot start.
+		 * Claim this UART (unit 0) as the console.
+		 */
+		if (pluartcnattach(sc->sc.sc_iot, sc->sc_addr, B115200,
+		    TTYDEF_CFLAG) == 0)
+			console = 1;
+	}
+
+	pluart_attach_common(&sc->sc, console);
 }
 
 int
