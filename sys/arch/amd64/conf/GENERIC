@@ -572,6 +572,7 @@ jme*	at pci?				# JMicron JMC250/JMC260 Ethernet
 bnxt*	at pci?				# Broadcom BCM573xx, BCM574xx
 dwqe*	at pci?				# Intel Elkhart Lake Ethernet
 mcx*	at pci?				# Mellanox ConnectX-4
+ena*	at pci?				# Amazon Elastic Network Adapter
 aq*	at pci?				# Aquantia aQtion Ethernet
 igc*	at pci?				# Intel I225 Ethernet
 ngbe*	at pci?				# WangXun WX1860 Ethernet
