@@ -1,4 +1,4 @@
-/* $OpenBSD: layout.c,v 1.76 2026/06/22 13:57:33 nicm Exp $ */
+/* $OpenBSD: layout.c,v 1.78 2026/06/23 09:29:26 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -20,6 +20,7 @@
 #include <sys/types.h>
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "tmux.h"
 
@@ -1507,6 +1508,7 @@ layout_get_tiled_cell(struct cmdq_item *item, struct args *args,
 	enum layout_type	 type;
 	u_int			 curval;
 	int			 size = -1;
+	char			*error = NULL;
 
 	if (window_pane_is_floating(wp)) {
 		*cause = xstrdup("can't split a floating pane");
@@ -1533,15 +1535,16 @@ layout_get_tiled_cell(struct cmdq_item *item, struct args *args,
 
 	if (args_has(args, 'l')) {
 		size = args_percentage_and_expand(args, 'l', 0, INT_MAX, curval,
-		    item, cause);
+		    item, &error);
 	} else if (args_has(args, 'p')) {
 		size = args_strtonum_and_expand(args, 'p', 0, 100, item,
-		    cause);
-		if (*cause == NULL)
+		    &error);
+		if (error == NULL)
 			size = curval * size / 100;
 	}
-	if (*cause != NULL) {
-		*cause = xstrdup("invalid tiled geometry");
+	if (error != NULL) {
+		xasprintf(cause, "invalid tiled geometry %s", error);
+		free(error);
 		return (NULL);
 	}
 
@@ -1561,7 +1564,8 @@ layout_get_tiled_cell(struct cmdq_item *item, struct args *args,
 /* Get a new floating cell. */
 struct layout_cell *
 layout_get_floating_cell(struct cmdq_item *item, struct args *args,
-    struct window *w, struct window_pane *wp, char **cause)
+    enum pane_lines lines, struct window *w, struct window_pane *wp,
+    char **cause)
 {
 	struct layout_cell	*lcnew;
 	int			 sx = w->sx / 2, sy = w->sy / 4;
@@ -1569,22 +1573,26 @@ layout_get_floating_cell(struct cmdq_item *item, struct args *args,
 	char			*error;
 
 	if (args_has(args, 'x')) {
-		sx = args_percentage_and_expand(args, 'x', 0, w->sx - 1, w->sx,
-		    item, &error);
+		sx = args_percentage_and_expand(args, 'x', 0, PANE_MAXIMUM,
+		    w->sx, item, &error);
 		if (error != NULL) {
 			xasprintf(cause, "position %s", error);
 			free(error);
 			return (NULL);
 		}
+		if (lines != PANE_LINES_NONE)
+			sx -= 2;
 	}
 	if (args_has(args, 'y')) {
-		sy = args_percentage_and_expand(args, 'y', 0, w->sy - 1, w->sy,
-		    item, &error);
+		sy = args_percentage_and_expand(args, 'y', 0, PANE_MAXIMUM,
+		    w->sy, item, &error);
 		if (error != NULL) {
 			xasprintf(cause, "position %s", error);
 			free(error);
 			return (NULL);
 		}
+		if (lines != PANE_LINES_NONE)
+			sy -= 2;
 	}
 	if (args_has(args, 'X')) {
 		ox = args_percentage_and_expand(args, 'X', -sx, w->sx,
@@ -1614,7 +1622,9 @@ layout_get_floating_cell(struct cmdq_item *item, struct args *args,
 				ox = 4;
 		}
 		w->last_new_pane_x = ox;
-	}
+	} else
+		if (lines != PANE_LINES_NONE)
+			ox += 1;
 	if (oy == INT_MAX) {
 		if (w->last_new_pane_y == 0)
 			oy = 2;
@@ -1624,7 +1634,9 @@ layout_get_floating_cell(struct cmdq_item *item, struct args *args,
 				oy = 2;
 		}
 		w->last_new_pane_y = oy;
-	}
+	} else
+		if (lines != PANE_LINES_NONE)
+			oy += 1;
 
 	if (sx < PANE_MINIMUM || sx > PANE_MAXIMUM) {
 		*cause = xstrdup("invalid width");
