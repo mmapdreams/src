@@ -1,4 +1,4 @@
-/*	$OpenBSD: v_sentence.c,v 1.11 2026/04/25 19:30:59 millert Exp $	*/
+/*	$OpenBSD: v_sentence.c,v 1.13 2026/06/16 22:59:03 millert Exp $	*/
 
 /*-
  * Copyright (c) 1992, 1993, 1994
@@ -175,8 +175,20 @@ okret:	vp->m_stop.lno = cs.cs_lno;
 	 * range for motion commands.
 	 */
 	if (ISMOTION(vp)) {
-		if (vp->m_start.cno == 0 &&
+		if (cs.cs_flags == CS_EOF) {
+			/*
+			 * If EOF is reached, maintain the stop position
+			 * at the very end of the file (cs_len - 1) instead
+			 * of decrementing it.
+			 */
+			vp->m_stop.lno = cs.cs_lno;
+			vp->m_stop.cno = cs.cs_len > 0 ? cs.cs_len - 1 : 0;
+		} else if (vp->m_start.cno == 0 &&
 		    (cs.cs_flags != 0 || vp->m_stop.cno == 0)) {
+			/*
+			 * If in line mode, adjust stop to the end of
+			 * the previous line.
+			 */
 			if (vp->m_start.lno < vp->m_stop.lno) {
 				if (db_get(sp,
 				    --vp->m_stop.lno, DBG_FATAL, NULL, &len))
@@ -184,11 +196,13 @@ okret:	vp->m_stop.lno = cs.cs_lno;
 				vp->m_stop.cno = len ? len - 1 : 0;
 			}
 			F_SET(vp, VM_LMODE);
-		} else
+		} else if (vp->m_stop.cno > 0) {
 			--vp->m_stop.cno;
+		}
 		vp->m_final = vp->m_start;
-	} else
+	} else {
 		vp->m_final = vp->m_stop;
+	}
 	return (0);
 }
 
@@ -205,7 +219,7 @@ v_sentenceb(SCR *sp, VICMD *vp)
 	recno_t slno;
 	size_t len, scno;
 	u_long cnt;
-	int last;
+	int last, next;
 
 	/*
 	 * !!!
@@ -249,7 +263,7 @@ v_sentenceb(SCR *sp, VICMD *vp)
 				break;
 		}
 
-	for (last = 0;;) {
+	for (last = 0, next = '\0';;) {
 		if (cs_prev(sp, &cs))
 			return (1);
 		if (cs.cs_flags == CS_SOF)	/* SOF is a movement sink. */
@@ -332,7 +346,12 @@ ret:			slno = cs.cs_lno;
 			    cs.cs_flags == CS_EOL || isblank(cs.cs_ch) ||
 			    cs.cs_ch == ')' || cs.cs_ch == ']' ||
 			    cs.cs_ch == '"' || cs.cs_ch == '\'' ? 1 : 0;
+
+			/* A sentence ends with two spaces. */
+			if (cs.cs_ch == ' ' && next != ' ')
+				last = 0;
 		}
+		next = cs.cs_ch;
 	}
 
 okret:	vp->m_stop.lno = cs.cs_lno;

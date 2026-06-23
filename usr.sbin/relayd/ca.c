@@ -1,4 +1,4 @@
-/*	$OpenBSD: ca.c,v 1.50 2026/03/05 07:27:01 rsadowski Exp $	*/
+/*	$OpenBSD: ca.c,v 1.55 2026/06/15 11:02:13 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -193,7 +193,7 @@ ca_launch(void)
 int
 ca_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_CFG_RELAY:
 		config_getrelay(env, imsg);
 		break;
@@ -219,21 +219,30 @@ ca_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 int
 ca_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
+	struct ibuf		 ibuf;
 	struct ctl_keyop	 cko;
 	EVP_PKEY		*pkey;
 	RSA			*rsa;
-	u_char			*from = NULL, *to = NULL;
+	u_char			*to = NULL;
 	struct iovec		 iov[2];
 	int			 c = 0;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_CA_PRIVENC:
 	case IMSG_CA_PRIVDEC:
-		IMSG_SIZE_CHECK(imsg, (&cko));
-		bcopy(imsg->data, &cko, sizeof(cko));
+		if (imsg_get_ibuf(imsg, &ibuf) == -1) {
+			log_warn("%s: imsg_get_ibuf", __func__);
+			return (-1);
+		}
+
+		if (ibuf_get(&ibuf, &cko, sizeof(cko)) == -1) {
+			log_warn("%s: ibuf_get", __func__);
+			return (-1);
+		}
+
 		if (cko.cko_proc > env->sc_conf.prefork_relay)
 			fatalx("%s: invalid relay proc", __func__);
-		if (IMSG_DATA_SIZE(imsg) != (sizeof(cko) + cko.cko_flen))
+		if (ibuf_size(&ibuf) != (size_t)cko.cko_flen)
 			fatalx("%s: invalid key operation", __func__);
 
 		if ((pkey = pkey_find(env, cko.cko_hash)) == NULL) {
@@ -244,8 +253,8 @@ ca_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 			iov[c].iov_base = &cko;
 			iov[c++].iov_len = sizeof(cko);
 			if (proc_composev_imsg(env->sc_ps, PROC_RELAY,
-			    cko.cko_proc, imsg->hdr.type, -1, -1, iov,
-			     c) == -1)
+			    cko.cko_proc, imsg_get_type(imsg), -1, -1, iov,
+			    c) == -1)
 				log_warn("%s: proc_composev_imsg", __func__);
 			break;
 		}
@@ -256,18 +265,17 @@ ca_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 		DPRINTF("%s:%d: key hash %s proc %d",
 		    __func__, __LINE__, cko.cko_hash, cko.cko_proc);
 
-		from = (u_char *)imsg->data + sizeof(cko);
 		if ((to = calloc(1, cko.cko_tlen)) == NULL)
 			fatalx("%s: calloc", __func__);
 
-		switch (imsg->hdr.type) {
+		switch (imsg_get_type(imsg)) {
 		case IMSG_CA_PRIVENC:
-			cko.cko_tlen = RSA_private_encrypt(cko.cko_flen,
-			    from, to, rsa, cko.cko_padding);
+			cko.cko_tlen = RSA_private_encrypt(ibuf_size(&ibuf),
+			    ibuf_data(&ibuf), to, rsa, cko.cko_padding);
 			break;
 		case IMSG_CA_PRIVDEC:
-			cko.cko_tlen = RSA_private_decrypt(cko.cko_flen,
-			    from, to, rsa, cko.cko_padding);
+			cko.cko_tlen = RSA_private_decrypt(ibuf_size(&ibuf),
+			    ibuf_data(&ibuf), to, rsa, cko.cko_padding);
 			break;
 		}
 
@@ -285,7 +293,7 @@ ca_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 		}
 
 		if (proc_composev_imsg(env->sc_ps, PROC_RELAY, cko.cko_proc,
-		    imsg->hdr.type, -1, -1, iov, c) == -1)
+		    imsg_get_type(imsg), -1, -1, iov, c) == -1)
 			log_warn("%s: proc_composev_imsg", __func__);
 
 		free(to);
@@ -309,24 +317,24 @@ static int
 rsae_send_imsg(int flen, const u_char *from, u_char *to, RSA *rsa,
     int padding, u_int cmd)
 {
+	struct ibuf	 ibuf;
 	struct privsep	*ps = env->sc_ps;
 	struct pollfd	 pfd[1];
 	struct ctl_keyop cko;
 	int		 ret = 0;
 	char		*hash;
 	struct iovec	 iov[2];
-	struct imsgbuf	*ibuf;
+	struct imsgbuf	*imsgbuf;
 	struct imsgev	*iev;
 	struct imsg	 imsg;
 	int		 n, done = 0, cnt = 0;
-	u_char		*toptr;
 	static u_int	 seq = 0;
 
 	if ((hash = RSA_get_ex_data(rsa, 0)) == NULL)
 		return 0;
 
 	iev = proc_iev(ps, PROC_CA, ps->ps_instance);
-	ibuf = &iev->ibuf;
+	imsgbuf = &iev->ibuf;
 
 	/*
 	 * XXX this could be nicer...
@@ -348,16 +356,16 @@ rsae_send_imsg(int flen, const u_char *from, u_char *to, RSA *rsa,
 	 * Send a synchronous imsg because we cannot defer the RSA
 	 * operation in OpenSSL.
 	 */
-	if (imsg_composev(ibuf, cmd, 0, 0, -1, iov, cnt) == -1) {
+	if (imsg_composev(imsgbuf, cmd, 0, 0, -1, iov, cnt) == -1) {
 		log_warn("%s: imsg_composev", __func__);
 		return -1;
 	}
-	if (imsgbuf_flush(ibuf) == -1) {
+	if (imsgbuf_flush(imsgbuf) == -1) {
 		log_warn("%s: imsgbuf_flush", __func__);
 		return -1;
 	}
 
-	pfd[0].fd = ibuf->fd;
+	pfd[0].fd = imsgbuf->fd;
 	pfd[0].events = POLLIN;
 	while (!done) {
 		switch (poll(pfd, 1, RELAY_TLS_PRIV_TIMEOUT)) {
@@ -374,19 +382,28 @@ rsae_send_imsg(int flen, const u_char *from, u_char *to, RSA *rsa,
 		default:
 			break;
 		}
-		if ((n = imsgbuf_read(ibuf)) == -1)
+		if ((n = imsgbuf_read(imsgbuf)) == -1)
 			fatalx("imsgbuf_read");
 		if (n == 0)
 			fatalx("pipe closed");
 
 		while (!done) {
-			if ((n = imsg_get(ibuf, &imsg)) == -1)
+			if ((n = imsgbuf_get(imsgbuf, &imsg)) == -1)
 				fatalx("imsg_get error");
 			if (n == 0)
 				break;
 
-			IMSG_SIZE_CHECK(&imsg, (&cko));
-			memcpy(&cko, imsg.data, sizeof(cko));
+			if (imsg_get_ibuf(&imsg, &ibuf) == -1) {
+				log_warn("%s: imsg_get_ibuf", __func__);
+				imsg_free(&imsg);
+				return (-1);
+			}
+
+			if (ibuf_get(&ibuf, &cko, sizeof(cko)) == -1) {
+				log_warn("%s: ibuf_get", __func__);
+				imsg_free(&imsg);
+				return (-1);
+			}
 
 			/*
 			 * Due to earlier timed out requests, there may be
@@ -401,7 +418,7 @@ rsae_send_imsg(int flen, const u_char *from, u_char *to, RSA *rsa,
 				continue;
 			}
 
-			if (imsg.hdr.type != cmd)
+			if (imsg_get_type(&imsg) != cmd)
 				fatalx("invalid response");
 
 			ret = cko.cko_tlen;
@@ -410,11 +427,9 @@ rsae_send_imsg(int flen, const u_char *from, u_char *to, RSA *rsa,
 				    __func__, cmd == IMSG_CA_PRIVENC ?
 				    "enc" : "dec", cko.cko_hash);
 			} else if (ret > 0) {
-				if (IMSG_DATA_SIZE(&imsg) !=
-				    (sizeof(cko) + ret))
+				if (ibuf_get(&ibuf, to, ret) == -1 ||
+				    ibuf_size(&ibuf) != 0)
 					fatalx("data size");
-				toptr = (u_char *)imsg.data + sizeof(cko);
-				memcpy(to, toptr, ret);
 			}
 			done = 1;
 
@@ -461,6 +476,8 @@ ca_engine_init(struct relayd *x_env)
 		goto fail;
 	}
 
+	ERR_clear_error();
+
 	RSA_meth_set_priv_enc(rsae_method, rsae_priv_enc);
 	RSA_meth_set_priv_dec(rsae_method, rsae_priv_dec);
 
@@ -474,6 +491,6 @@ ca_engine_init(struct relayd *x_env)
 	return;
 
  fail:
-	RSA_meth_free(rsae_method);
+	ssl_error(errstr);
 	fatalx("%s: %s", __func__, errstr);
 }

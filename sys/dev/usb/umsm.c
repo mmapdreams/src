@@ -1,4 +1,4 @@
-/*	$OpenBSD: umsm.c,v 1.129 2025/10/15 03:30:53 dlg Exp $	*/
+/*	$OpenBSD: umsm.c,v 1.131 2026/06/22 05:36:42 dlg Exp $	*/
 
 /*
  * Copyright (c) 2008 Yojiro UO <yuo@nui.org>
@@ -187,6 +187,7 @@ static const struct umsm_type umsm_devs[] = {
 	{{ USB_VENDOR_QUECTEL, USB_PRODUCT_QUECTEL_BG95 }, 0},
 	{{ USB_VENDOR_QUECTEL, USB_PRODUCT_QUECTEL_EC200A }, 0},
 	{{ USB_VENDOR_QUECTEL, USB_PRODUCT_QUECTEL_RG5XXQ }, 0},
+	{{ USB_VENDOR_QUECTEL, USB_PRODUCT_QUECTEL_EM12G_MSFT3 }, 0},
 
 	{{ USB_VENDOR_ZTE, USB_PRODUCT_ZTE_AC2746 }, 0},
 	{{ USB_VENDOR_ZTE, USB_PRODUCT_ZTE_UMASS_INSTALLER }, DEV_UMASS4},
@@ -446,7 +447,6 @@ umsm_attach(struct device *parent, struct device *self, void *aux)
 	}
 	if (uca.bulkin == -1 || uca.bulkout == -1) {
 		printf("%s: missing endpoint\n", sc->sc_dev.dv_xname);
-		usbd_deactivate(sc->sc_udev);
 		return;
 	}
 

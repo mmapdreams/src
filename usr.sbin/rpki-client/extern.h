@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.281 2026/05/18 16:26:41 tb Exp $ */
+/*	$OpenBSD: extern.h,v 1.284 2026/06/22 21:25:44 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -159,6 +159,7 @@ struct nonfunc_ca {
 	char			*mfturi;
 	char			*ski;
 	int			 certid;
+	unsigned int		 repoid;
 	int			 talid;
 };
 
@@ -601,8 +602,6 @@ enum stype {
 	STYPE_PROVIDERS,
 	STYPE_OVERFLOW,
 	STYPE_SEQNUM_GAP,
-	STYPE_FUNC,
-	STYPE_NONFUNC,
 };
 
 struct repo;
@@ -725,9 +724,9 @@ struct cert	*ta_validate(const char *, struct cert *, const unsigned char *,
 		    size_t);
 struct cert	*cert_read(struct ibuf *);
 void		 cert_insert_brks(struct brk_tree *, struct cert *);
-void		 cert_insert_nca(struct nca_tree *, const struct cert *,
-		    struct repo *);
-void		 cert_remove_nca(struct nca_tree *, int, struct repo *);
+
+void		 nca_tree_insert_cert(struct nca_tree *, const struct cert *);
+void		 nca_tree_remove_cert(struct nca_tree *, int);
 
 enum rtype	 rtype_from_file_extension(const char *);
 void		 mft_buffer(struct ibuf *, const struct mft *);
@@ -859,7 +858,7 @@ void		 proc_filemode(int) __attribute__((noreturn));
 
 /* Rsync-specific. */
 
-char		*rsync_base_uri(const char *);
+int		 rsync_base_uri(const char *, char **);
 void		 proc_rsync(char *, char *, int) __attribute__((noreturn));
 
 /* HTTP and RRDP processes. */
@@ -895,6 +894,7 @@ void		 repo_cleanup(struct filepath_tree *, int);
 int		 repo_check_timeout(int);
 void		 repostats_new_files_inc(struct repo *, const char *);
 void		 repo_stat_inc(struct repo *, int, enum rtype, enum stype);
+void		 repo_stat_add_nca(struct nonfunc_ca *);
 void		 repo_tal_stats_collect(void (*)(const struct repo *,
 		    const struct repotalstats *, void *), int, void *);
 void		 repo_stats_collect(void (*)(const struct repo *,

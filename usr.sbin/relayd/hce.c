@@ -1,4 +1,4 @@
-/*	$OpenBSD: hce.c,v 1.83 2026/03/02 19:28:01 rsadowski Exp $	*/
+/*	$OpenBSD: hce.c,v 1.85 2026/06/15 11:02:13 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -39,7 +39,7 @@ int	 hce_dispatch_parent(int, struct privsep_proc *, struct imsg *);
 int	 hce_dispatch_pfe(int, struct privsep_proc *, struct imsg *);
 int	 hce_dispatch_relay(int, struct privsep_proc *, struct imsg *);
 
-static struct relayd *env = NULL;
+static struct relayd	*env = NULL;
 int			 running = 0;
 
 static struct privsep_proc procs[] = {
@@ -259,7 +259,7 @@ hce_notify_done(struct host *host, enum host_error he)
 
 	if (env->sc_conf.opts & logopt) {
 		if (host->code > 0)
-		    asprintf(&codemsg, ",%d", host->code);
+			asprintf(&codemsg, ",%d", host->code);
 		log_info("host %s, check %s%s (%lums,%s%s), state %s -> %s, "
 		    "availability %s",
 		    host->conf.name, table_check(table->conf.check),
@@ -289,7 +289,7 @@ hce_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 	struct host		*host;
 	struct table		*table;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_HOST_DISABLE:
 		memcpy(&id, imsg->data, sizeof(id));
 		if ((host = host_find(env, id)) == NULL)
@@ -342,10 +342,10 @@ hce_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	struct ctl_script	 scr;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_SCRIPT:
-		IMSG_SIZE_CHECK(imsg, &scr);
-		bcopy(imsg->data, &scr, sizeof(scr));
+		if (imsg_get_data(imsg, &scr, sizeof(scr)) == -1)
+			return (-1);
 		script_done(env, &scr);
 		break;
 	case IMSG_CFG_TABLE:
@@ -373,7 +373,7 @@ hce_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 int
 hce_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	default:
 		break;
 	}

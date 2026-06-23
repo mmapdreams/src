@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysv_msg.c,v 1.41 2023/04/11 00:45:09 jsg Exp $	*/
+/*	$OpenBSD: sysv_msg.c,v 1.43 2026/06/19 20:30:31 mvs Exp $	*/
 /*	$NetBSD: sysv_msg.c,v 1.19 1996/02/09 19:00:18 christos Exp $	*/
 /*
  * Copyright (c) 2009 Bret S. Lambert <blambert@openbsd.org>
@@ -56,8 +56,8 @@ void msg_free(struct msg *);
 void msg_enqueue(struct que *, struct msg *, struct proc *);
 void msg_dequeue(struct que *, struct msg *, struct proc *);
 struct msg *msg_lookup(struct que *, int);
-int msg_copyin(struct msg *, const char *, size_t, struct proc *);
-int msg_copyout(struct msg *, char *, size_t *, struct proc *);
+int msg_copyin(struct msg *, const char *, size_t);
+int msg_copyout(struct msg *, char *, size_t *);
 
 struct	pool sysvmsgpl;
 struct	msginfo msginfo;
@@ -280,7 +280,7 @@ sys_msgsnd(struct proc *p, void *v, register_t *retval)
 	}
 
 	/* msg_copyin frees msg on error */
-	if ((error = msg_copyin(msg, (const char *)SCARG(uap, msgp), msgsz, p)))
+	if ((error = msg_copyin(msg, (const char *)SCARG(uap, msgp), msgsz)))
 		goto out;
 
 	msg_enqueue(que, msg, p);
@@ -346,7 +346,7 @@ sys_msgrcv(struct proc *p, void *v, register_t *retval)
 	}
 
 	/* if msg_copyout fails, keep the message around so it isn't lost */
-	if ((error = msg_copyout(msg, msgp, &msgsz, p)))
+	if ((error = msg_copyout(msg, msgp, &msgsz)))
 		goto out;
 
 	msg_dequeue(que, msg, p);
@@ -565,7 +565,7 @@ msg_dequeue(struct que *que, struct msg *msg, struct proc *p)
  */
 
 int
-msg_copyin(struct msg *msg, const char *ubuf, size_t len, struct proc *p)
+msg_copyin(struct msg *msg, const char *ubuf, size_t len)
 {
 	struct mbuf **mm, *m;
 	size_t xfer;
@@ -574,7 +574,8 @@ msg_copyin(struct msg *msg, const char *ubuf, size_t len, struct proc *p)
 	if (msg == NULL)
 		panic ("msg NULL");
 
-	if ((error = copyin(ubuf, &msg->msg_type, sizeof(long)))) {
+	/* msg->msg_type size is not included to `len' */
+	if ((error = copyin(ubuf, &msg->msg_type, sizeof(msg->msg_type)))) {
 		msg_free(msg);
 		return (error);
 	}
@@ -584,18 +585,18 @@ msg_copyin(struct msg *msg, const char *ubuf, size_t len, struct proc *p)
 		return (EINVAL);
 	}
 
-	ubuf += sizeof(long);
+	ubuf += sizeof(msg->msg_type);
 
 	msg->msg_len = 0;
 	mm = &msg->msg_data;
 
 	while (msg->msg_len < len) {
 		m = m_get(M_WAIT, MT_DATA);
-		if (len >= MINCLSIZE) {
+		if ((xfer = len - msg->msg_len) >= MINCLSIZE) {
 			MCLGET(m, M_WAIT);
-			xfer = min(len, MCLBYTES);
+			xfer = min(xfer, MCLBYTES);
 		} else {
-			xfer = min(len, MLEN);
+			xfer = min(xfer, MLEN);
 		}
 		m->m_len = xfer;
 		msg->msg_len += xfer;
@@ -615,7 +616,7 @@ msg_copyin(struct msg *msg, const char *ubuf, size_t len, struct proc *p)
 }
 
 int
-msg_copyout(struct msg *msg, char *ubuf, size_t *len, struct proc *p)
+msg_copyout(struct msg *msg, char *ubuf, size_t *len)
 {
 	struct mbuf *m;
 	size_t xfer;

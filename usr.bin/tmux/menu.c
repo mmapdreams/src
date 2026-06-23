@@ -1,4 +1,4 @@
-/* $OpenBSD: menu.c,v 1.64 2026/06/09 21:22:22 nicm Exp $ */
+/* $OpenBSD: menu.c,v 1.67 2026/06/22 10:17:08 nicm Exp $ */
 
 /*
  * Copyright (c) 2019 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -257,8 +257,7 @@ menu_reapply_styles(struct menu_data *md, struct client *c)
 }
 
 void
-menu_draw_cb(struct client *c, void *data,
-    __unused struct screen_redraw_ctx *rctx)
+menu_draw_cb(struct client *c, void *data)
 {
 	struct menu_data	*md = data;
 	struct tty		*tty = &c->tty;
@@ -438,7 +437,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 					break;
 			}
 		}
-		while (name == NULL || *name == '-') {
+		while ((name == NULL || *name == '-') && md->choice != 0) {
 			md->choice--;
 			name = menu->items[md->choice].name;
 		}
@@ -448,7 +447,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 	case KEYC_HOME:
 		md->choice = 0;
 		name = menu->items[md->choice].name;
-		while (name == NULL || *name == '-') {
+		while ((name == NULL || *name == '-') && md->choice != count - 1) {
 			md->choice++;
 			name = menu->items[md->choice].name;
 		}
@@ -458,7 +457,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 	case KEYC_END:
 		md->choice = count - 1;
 		name = menu->items[md->choice].name;
-		while (name == NULL || *name == '-') {
+		while ((name == NULL || *name == '-') && md->choice != 0) {
 			md->choice--;
 			name = menu->items[md->choice].name;
 		}
@@ -636,7 +635,7 @@ menu_display(struct menu *menu, int flags, int starting_choice,
 	    style, selected_style, border_style, fs, cb, data);
 	if (md == NULL)
 		return (-1);
-	server_client_set_overlay(c, 0, NULL, menu_mode_cb, menu_draw_cb,
-	    menu_key_cb, menu_free_cb, menu_resize_cb, md);
+	server_client_set_overlay(c, 0, menu_check_cb, menu_mode_cb,
+	    menu_draw_cb, menu_key_cb, menu_free_cb, menu_resize_cb, md);
 	return (0);
 }

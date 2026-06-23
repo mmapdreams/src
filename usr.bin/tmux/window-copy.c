@@ -1,4 +1,4 @@
-/* $OpenBSD: window-copy.c,v 1.405 2026/06/13 08:59:52 nicm Exp $ */
+/* $OpenBSD: window-copy.c,v 1.408 2026/06/22 08:47:46 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -800,7 +800,7 @@ window_copy_scroll1(struct window_mode_entry *wme, struct window_pane *wp,
 		return;
 
 	/*
-	 * See screen_redraw_draw_pane_scrollbar - this is the inverse of the
+	 * See redraw_draw_pane_scrollbar - this is the inverse of the
 	 * formula used there.
 	 */
 	new_offset = new_slider_y * ((float)(size + sb_height) / sb_height);
@@ -5403,8 +5403,12 @@ window_copy_update_cursor(struct window_mode_entry *wme, u_int cx, u_int cy)
 	u_int				 maxx;
 	int				 allow_onemore;
 
-	allow_onemore = (data->screen.sel != NULL && data->rectflag);
-	if (cy < screen_size_y(s)) {
+	/*
+	 * Allow rectangle selection to extend past end of current line to
+	 * behave the same as vi with virtualedit=block set.
+	 */
+	if (!data->rectflag && cy < screen_size_y(s)) {
+		allow_onemore = (data->screen.sel != NULL && data->rectflag);
 		py = screen_hsize(data->backing) + cy - data->oy;
 		maxx = window_copy_cursor_limit(wme, py, allow_onemore);
 		if (cx > maxx)
@@ -6105,6 +6109,7 @@ static void
 window_copy_cursor_up(struct window_mode_entry *wme, int scroll_only)
 {
 	struct window_copy_mode_data	*data = wme->data;
+	struct options			*oo = wme->wp->window->options;
 	struct screen			*s = &data->screen;
 	u_int				 ox, oy, px, py;
 	int				 norectsel;
@@ -6119,6 +6124,11 @@ window_copy_cursor_up(struct window_mode_entry *wme, int scroll_only)
 
 	if (data->lineflag == LINE_SEL_LEFT_RIGHT && oy == data->sely)
 		window_copy_other_end(wme);
+
+	if (scroll_only && options_get_number(oo, "mode-keys") == MODEKEY_VI) {
+		if (data->cy < screen_size_y(s) - 1)
+			window_copy_update_cursor(wme, data->cx, data->cy + 1);
+	}
 
 	if (scroll_only || data->cy == 0) {
 		if (norectsel)
@@ -6179,6 +6189,7 @@ static void
 window_copy_cursor_down(struct window_mode_entry *wme, int scroll_only)
 {
 	struct window_copy_mode_data	*data = wme->data;
+	struct options			*oo = wme->wp->window->options;
 	struct screen			*s = &data->screen;
 	u_int				 ox, oy, px, py;
 	int				 norectsel;
@@ -6193,6 +6204,11 @@ window_copy_cursor_down(struct window_mode_entry *wme, int scroll_only)
 
 	if (data->lineflag == LINE_SEL_RIGHT_LEFT && oy == data->endsely)
 		window_copy_other_end(wme);
+
+	if (scroll_only && options_get_number(oo, "mode-keys") == MODEKEY_VI) {
+		if (data->cy > 0)
+			window_copy_update_cursor(wme, data->cx, data->cy - 1);
+	}
 
 	if (scroll_only || data->cy == screen_size_y(s) - 1) {
 		if (norectsel)
