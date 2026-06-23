@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-display-panes.c,v 1.51 2026/06/09 21:31:16 nicm Exp $ */
+/* $OpenBSD: cmd-display-panes.c,v 1.54 2026/06/22 08:47:45 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -48,6 +48,16 @@ struct cmd_display_panes_data {
 	struct args_command_state	*state;
 };
 
+struct cmd_display_panes_ctx {
+	struct client	*c;
+	int		 ox;
+	int		 oy;
+	u_int		 sx;
+	u_int		 sy;
+	u_int		 statuslines;
+	int		 statustop;
+};
+
 static enum args_parse_type
 cmd_display_panes_args_parse(__unused struct args *args, __unused u_int idx,
     __unused char **cause)
@@ -56,7 +66,7 @@ cmd_display_panes_args_parse(__unused struct args *args, __unused u_int idx,
 }
 
 static void
-cmd_display_panes_put(struct screen_redraw_ctx *ctx,
+cmd_display_panes_put(struct cmd_display_panes_ctx *ctx,
     struct window_pane *wp, u_int cx, u_int cy, const char *buf, size_t len)
 {
 	struct client		*c = ctx->c;
@@ -65,8 +75,7 @@ cmd_display_panes_put(struct screen_redraw_ctx *ctx,
 	struct visible_range	*ri;
 	u_int			 i, j;
 
-	r = screen_redraw_get_visible_ranges(wp, ctx->ox + cx, ctx->oy + cy,
-	    len, NULL);
+	r = window_visible_ranges(wp, ctx->ox + cx, ctx->oy + cy, len, NULL);
 	for (i = 0; i < r->used; i++) {
 		ri = &r->ranges[i];
 		for (j = ri->px; j < ri->px + ri->nx; j++) {
@@ -77,7 +86,7 @@ cmd_display_panes_put(struct screen_redraw_ctx *ctx,
 }
 
 static void
-cmd_display_panes_draw_format(struct screen_redraw_ctx *ctx,
+cmd_display_panes_draw_format(struct cmd_display_panes_ctx *ctx,
     struct window_pane *wp, u_int xoff, u_int yoff, u_int sx,
     const struct grid_cell *gc)
 {
@@ -103,7 +112,7 @@ cmd_display_panes_draw_format(struct screen_redraw_ctx *ctx,
 	screen_write_stop(&sctx);
 	free(expanded);
 
-	r = screen_redraw_get_visible_ranges(wp, px, wp->yoff, sx, NULL);
+	r = window_visible_ranges(wp, px, wp->yoff, sx, NULL);
 	for (i = 0; i < r->used; i++) {
 		ri = &r->ranges[i];
 		tty_draw_line(tty, &screen, ri->px - px, 0, ri->nx,
@@ -113,7 +122,7 @@ cmd_display_panes_draw_format(struct screen_redraw_ctx *ctx,
 }
 
 static void
-cmd_display_panes_draw_pane(struct screen_redraw_ctx *ctx,
+cmd_display_panes_draw_pane(struct cmd_display_panes_ctx *ctx,
     struct window_pane *wp)
 {
 	struct client		*c = ctx->c;
@@ -255,17 +264,30 @@ out:
 }
 
 static void
-cmd_display_panes_draw(struct client *c, __unused void *data,
-    struct screen_redraw_ctx *ctx)
+cmd_display_panes_draw(struct client *c, __unused void *data)
 {
-	struct window		*w = c->session->curw->window;
-	struct window_pane	*wp;
+	struct session			*s = c->session;
+	struct window			*w = s->curw->window;
+	struct window_pane		*wp;
+	struct cmd_display_panes_ctx	 ctx;
+	u_int				 lines;
 
 	log_debug("%s: %s @%u", __func__, c->name, w->id);
 
+	memset(&ctx, 0, sizeof ctx);
+	ctx.c = c;
+	tty_window_offset(&c->tty, &ctx.ox, &ctx.oy, &ctx.sx, &ctx.sy);
+	if (options_get_number(s->options, "status-position") == 0) {
+		lines = status_line_size(c);
+		if (c->message_string != NULL || c->prompt_string != NULL)
+			lines = (lines == 0 ? 1 : lines);
+		ctx.statuslines = lines;
+		ctx.statustop = 1;
+	}
+
 	TAILQ_FOREACH(wp, &w->panes, entry) {
-		if (window_pane_visible(wp))
-			cmd_display_panes_draw_pane(ctx, wp);
+		if (window_pane_is_visible(wp))
+			cmd_display_panes_draw_pane(&ctx, wp);
 	}
 }
 

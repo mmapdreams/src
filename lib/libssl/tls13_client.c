@@ -1,4 +1,4 @@
-/* $OpenBSD: tls13_client.c,v 1.106 2025/12/04 21:16:17 beck Exp $ */
+/* $OpenBSD: tls13_client.c,v 1.108 2026/06/14 15:51:17 jsing Exp $ */
 /*
  * Copyright (c) 2018, 2019 Joel Sing <jsing@openbsd.org>
  *
@@ -450,15 +450,29 @@ tls13_client_hello_retry_send(struct tls13_ctx *ctx, CBB *cbb)
 	/*
 	 * Ensure that the server supported group is one that we listed in our
 	 * supported groups and is not the same as the key share we previously
-	 * offered.
+	 * offered. See RFC 8446 section 4.2.8.
 	 */
-	if (!tls1_check_group(ctx->ssl, ctx->hs->tls13.server_group))
-		return 0; /* XXX alert */
-	if (ctx->hs->tls13.server_group == tls_key_share_group(ctx->hs->key_share))
-		return 0; /* XXX alert */
+	if (!tls1_check_group(ctx->ssl, ctx->hs->tls13.server_group)) {
+		ctx->alert = TLS13_ALERT_ILLEGAL_PARAMETER;
+		return 0;
+	}
+	if (ctx->hs->tls13.server_group == tls_key_share_group(ctx->hs->key_share)) {
+		ctx->alert = TLS13_ALERT_ILLEGAL_PARAMETER;
+		return 0;
+	}
+	if (ctx->hs->tls13.key_share != NULL &&
+	    ctx->hs->tls13.server_group == tls_key_share_group(ctx->hs->tls13.key_share)) {
+		ctx->alert = TLS13_ALERT_ILLEGAL_PARAMETER;
+		return 0;
+	}
 
-	/* Switch to new key share. */
+	/* Free original key shares. */
 	tls_key_share_free(ctx->hs->key_share);
+	ctx->hs->key_share = NULL;
+	tls_key_share_free(ctx->hs->tls13.key_share);
+	ctx->hs->tls13.key_share = NULL;
+
+	/* Create new key share for server selected group. */
 	if ((ctx->hs->key_share =
 	    tls_key_share_new(ctx->hs->tls13.server_group)) == NULL)
 		return 0;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cert.c,v 1.238 2026/06/13 19:17:59 job Exp $ */
+/*	$OpenBSD: cert.c,v 1.241 2026/06/22 21:25:44 job Exp $ */
 /*
  * Copyright (c) 2022,2025 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2021 Job Snijders <job@openbsd.org>
@@ -34,6 +34,68 @@ int certid = TALSZ_MAX;
 
 static pthread_rwlock_t	cert_lk = PTHREAD_RWLOCK_INITIALIZER;
 
+/* Helper to sort a STACK_OF(X509_EXTENSION) by OID. */
+static int
+cert_extension_oid_cmp(const X509_EXTENSION *const *a,
+    const X509_EXTENSION *const *b)
+{
+	/* XXX - cast away const for OpenSSL 3 and LibreSSL */
+	const ASN1_OBJECT *ao = X509_EXTENSION_get_object((X509_EXTENSION *)*a);
+	const ASN1_OBJECT *bo = X509_EXTENSION_get_object((X509_EXTENSION *)*b);
+
+	return OBJ_cmp(ao, bo);
+}
+
+/*
+ * Per RFC 5280, Section 4.2, a certificate MUST NOT include more than
+ * one instance of a particular extension.
+ * Returns 1 if certificate conforms to this and 0 otherwise.
+ */
+static int
+cert_extension_oids_are_unique(const char *fn, const struct cert *cert)
+{
+	const X509 *x509 = cert->x509;
+	const STACK_OF(X509_EXTENSION) *cexts = NULL;
+	STACK_OF(X509_EXTENSION) *exts = NULL;
+	const X509_EXTENSION *prev, *curr;
+	const ASN1_OBJECT *obj;
+	int i, nid, rc = 0;
+
+	if (X509_get_ext_count(x509) <= 1)
+		goto done;
+
+	if ((cexts = X509_get0_extensions(x509)) == NULL)
+		goto out;
+
+	if ((exts = sk_X509_EXTENSION_dup(cexts)) == NULL)
+		goto out;
+
+	(void)sk_X509_EXTENSION_set_cmp_func(exts, cert_extension_oid_cmp);
+	sk_X509_EXTENSION_sort(exts);
+
+	prev = sk_X509_EXTENSION_value(exts, 0);
+	for (i = 1; i < sk_X509_EXTENSION_num(exts); i++) {
+		curr = sk_X509_EXTENSION_value(exts, i);
+		if (cert_extension_oid_cmp(&prev, &curr) == 0) {
+			/* XXX - cast away const for OpenSSL 3 and LibreSSL */
+			obj = X509_EXTENSION_get_object((X509_EXTENSION *)curr);
+			nid = OBJ_obj2nid(obj);
+			warnx("%s: RFC 5280 section 4.2: duplicate extension: "
+			   "%s", fn, nid2str(nid));
+			goto out;
+		}
+		prev = curr;
+	}
+
+ done:
+	rc = 1;
+
+ out:
+	sk_X509_EXTENSION_free(exts);
+
+	return rc;
+}
+
 /*
  * Check the cert's purpose: the cA bit in basic constraints distinguishes
  * between TA/CA and EE/BGPsec router and the key usage bits must match.
@@ -60,6 +122,9 @@ cert_check_purpose(const char *fn, struct cert *cert)
 		warnx("%s: could not cache X509v3 extensions", fn);
 		goto out;
 	}
+
+	if (!cert_extension_oids_are_unique(fn, cert))
+		goto out;
 
 	ext_flags = X509_get_extension_flags(x);
 
@@ -2043,57 +2108,3 @@ brkcmp(struct brk *a, struct brk *b)
 }
 
 RB_GENERATE(brk_tree, brk, entry, brkcmp);
-
-/*
- * Add each CA cert into the non-functional CA tree.
- */
-void
-cert_insert_nca(struct nca_tree *tree, const struct cert *cert, struct repo *rp)
-{
-	struct nonfunc_ca *nca;
-
-	if ((nca = calloc(1, sizeof(*nca))) == NULL)
-		err(1, NULL);
-	if ((nca->location = strdup(cert->path)) == NULL)
-		err(1, NULL);
-	if ((nca->carepo = strdup(cert->repo)) == NULL)
-		err(1, NULL);
-	if ((nca->mfturi = strdup(cert->mft)) == NULL)
-		err(1, NULL);
-	if ((nca->ski = strdup(cert->ski)) == NULL)
-		err(1, NULL);
-	nca->certid = cert->certid;
-	nca->talid = cert->talid;
-
-	if (RB_INSERT(nca_tree, tree, nca) != NULL)
-		errx(1, "non-functional CA tree corrupted");
-	repo_stat_inc(rp, nca->talid, RTYPE_CER, STYPE_NONFUNC);
-}
-
-void
-cert_remove_nca(struct nca_tree *tree, int cid, struct repo *rp)
-{
-	struct nonfunc_ca *found, needle = { .certid = cid };
-
-	if ((found = RB_FIND(nca_tree, tree, &needle)) != NULL) {
-		RB_REMOVE(nca_tree, tree, found);
-		repo_stat_inc(rp, found->talid, RTYPE_CER, STYPE_FUNC);
-		free(found->location);
-		free(found->carepo);
-		free(found->mfturi);
-		free(found->ski);
-		free(found);
-	}
-}
-
-static inline int
-ncacmp(const struct nonfunc_ca *a, const struct nonfunc_ca *b)
-{
-	if (a->certid < b->certid)
-		return -1;
-	if (a->certid > b->certid)
-		return 1;
-	return 0;
-}
-
-RB_GENERATE(nca_tree, nonfunc_ca, entry, ncacmp);

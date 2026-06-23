@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_vfy.c,v 1.149 2026/04/07 12:48:37 tb Exp $ */
+/* $OpenBSD: x509_vfy.c,v 1.152 2026/06/22 19:29:41 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -1082,18 +1082,15 @@ get_crl_sk(X509_STORE_CTX *ctx, X509_CRL **pcrl, X509_CRL **pdcrl,
 		}
 	}
 
-	if (best_crl) {
-		if (*pcrl)
-			X509_CRL_free(*pcrl);
+	if (best_crl != NULL) {
+		X509_CRL_free(*pcrl);
 		*pcrl = best_crl;
 		*pissuer = best_crl_issuer;
 		*pscore = best_score;
 		*preasons = best_reasons;
 		CRYPTO_add(&best_crl->references, 1, CRYPTO_LOCK_X509_CRL);
-		if (*pdcrl) {
-			X509_CRL_free(*pdcrl);
-			*pdcrl = NULL;
-		}
+		X509_CRL_free(*pdcrl);
+		*pdcrl = NULL;
 		get_delta_sk(ctx, pdcrl, pscore, best_crl, crls);
 	}
 
@@ -2420,9 +2417,9 @@ LCRYPTO_ALIAS(X509_STORE_get_check_issued);
 
 void
 X509_STORE_set_check_issued(X509_STORE *store,
-    X509_STORE_CTX_check_issued_fn check_issued)
+    X509_STORE_CTX_check_issued_fn check_issued_fn)
 {
-	store->check_issued = check_issued;
+	store->check_issued = check_issued_fn;
 }
 LCRYPTO_ALIAS(X509_STORE_set_check_issued);
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: server-client.c,v 1.467 2026/06/11 19:50:23 nicm Exp $ */
+/* $OpenBSD: server-client.c,v 1.477 2026/06/22 08:47:45 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -534,6 +534,7 @@ server_client_free(__unused int fd, __unused short events, void *arg)
 
 	log_debug("free client %p (%d references)", c, c->references);
 
+	redraw_free_scene(c->redraw_scene);
 	cmdq_free(c->queue);
 
 	if (c->references == 0) {
@@ -602,20 +603,20 @@ server_client_exec(struct client *c, const char *cmd)
 	free(msg);
 }
 
+/* Is the mouse inside a pane? */
 static enum key_code_mouse_location
 server_client_check_mouse_in_pane(struct window_pane *wp, int px, int py,
     u_int *sl_mpos)
 {
 	struct window		*w = wp->window;
-	struct options		*wo = w->options;
 	struct window_pane	*fwp;
 	int			 pane_status, sb, sb_pos, sb_w, sb_pad;
 	int			 pane_status_line, sl_top, sl_bottom;
 	int			 bdr_bottom, bdr_top, bdr_left, bdr_right;
 
-	sb = options_get_number(wo, "pane-scrollbars");
-	sb_pos = options_get_number(wo, "pane-scrollbars-position");
-	pane_status = options_get_number(wo, "pane-border-status");
+	sb = options_get_number(w->options, "pane-scrollbars");
+	sb_pos = options_get_number(w->options, "pane-scrollbars-position");
+	pane_status = window_pane_get_pane_status(wp);
 
 	if (window_pane_show_scrollbar(wp, sb)) {
 		sb_w = wp->scrollbar_style.width;
@@ -631,6 +632,9 @@ server_client_check_mouse_in_pane(struct window_pane *wp, int px, int py,
 		pane_status_line = wp->yoff + wp->sy;
 	else
 		pane_status_line = -1; /* not used */
+	bdr_left = wp->xoff - 1;
+	if (sb_pos == PANE_SCROLLBARS_LEFT)
+		bdr_left -= sb_pad + sb_w;
 
 	/* Check if point is within the pane or scrollbar. */
 	if (((pane_status != PANE_STATUS_OFF &&
@@ -660,7 +664,8 @@ server_client_check_mouse_in_pane(struct window_pane *wp, int px, int py,
 			} else /* py > sl_bottom */
 				return (KEYC_MOUSE_LOCATION_SCROLLBAR_DOWN);
 		} else if (window_pane_is_floating(wp) &&
-		    (px == wp->xoff - 1 ||
+		    window_pane_get_pane_lines(wp) != PANE_LINES_NONE &&
+		    (px == bdr_left ||
 		    py == wp->yoff - 1 ||
 		    py == wp->yoff + (int)wp->sy)) {
 			/* Floating pane left, bottom or top border. */
@@ -675,11 +680,23 @@ server_client_check_mouse_in_pane(struct window_pane *wp, int px, int py,
 			if ((w->flags & WINDOW_ZOOMED) &&
 			    (~fwp->flags & PANE_ZOOMED))
 				continue;
+			if (window_pane_is_floating(fwp) &&
+			    window_pane_get_pane_lines(fwp) == PANE_LINES_NONE)
+				continue;
+			if (window_pane_show_scrollbar(fwp, sb)) {
+				sb_w = fwp->scrollbar_style.width;
+				sb_pad = fwp->scrollbar_style.pad;
+			} else {
+				sb_w = 0;
+				sb_pad = 0;
+			}
 			bdr_top = fwp->yoff - 1;
 			bdr_bottom = fwp->yoff + fwp->sy;
-			if (sb_pos == PANE_SCROLLBARS_LEFT)
+			bdr_left = fwp->xoff - 1;
+			if (sb_pos == PANE_SCROLLBARS_LEFT) {
+				bdr_left -= sb_pad + sb_w;
 				bdr_right = fwp->xoff + fwp->sx;
-			else {
+			} else {
 				/* PANE_SCROLLBARS_RIGHT or none. */
 				bdr_right = fwp->xoff + fwp->sx + sb_pad + sb_w;
 			}
@@ -689,13 +706,11 @@ server_client_check_mouse_in_pane(struct window_pane *wp, int px, int py,
 					break;
 				if (window_pane_is_floating(wp)) {
 					/* Floating pane, check left border. */
-					bdr_left = fwp->xoff - 1;
 					if (px == bdr_left)
 						break;
 				}
 			}
-			if (px >= fwp->xoff - 1 &&
-			    px <= fwp->xoff + (int)fwp->sx) {
+			if (px >= bdr_left && px <= fwp->xoff + (int)fwp->sx) {
 				bdr_bottom = fwp->yoff + fwp->sy;
 				if (py == bdr_bottom)
 					break;
@@ -919,8 +934,7 @@ have_event:
 				log_debug("mouse %u,%u on pane %%%u", x, y,
 				    wp->id);
 			} else if (loc == KEYC_MOUSE_LOCATION_BORDER) {
-				sr = window_pane_border_status_get_range(wp, px,
-					py);
+				sr = window_pane_status_get_range(wp, px, py);
 				if (sr != NULL) {
 					n = sr->argument;
 					loc = KEYC_MOUSE_LOCATION_CONTROL0 + n;
@@ -1512,12 +1526,14 @@ server_client_handle_key0(struct client *c, struct key_event *event,
 	return (1);
 }
 
+/* Handle key and insert at end of queue. */
 int
 server_client_handle_key(struct client *c, struct key_event *event)
 {
 	return (server_client_handle_key0(c, event, NULL, NULL));
 }
 
+/* Handle key and insert after another item. */
 int
 server_client_handle_key_after(struct client *c, struct key_event *event,
     struct cmdq_item *after, struct cmdq_item **next)
@@ -1836,8 +1852,8 @@ server_client_reset_state(struct client *c)
 			cx = wp->xoff + (int)s->cx - (int)ox;
 			cy = wp->yoff + (int)s->cy - (int)oy;
 
-			r = screen_redraw_get_visible_ranges(wp, cx, cy, 1, NULL);
-			if (!screen_redraw_is_visible(r, cx))
+			r = window_visible_ranges(wp, cx, cy, 1, NULL);
+			if (!window_position_is_visible(r, cx))
 				cursor = 0;
 
 			if (status_at_line(c) == 0)
@@ -2003,32 +2019,55 @@ server_client_check_modes(struct client *c)
 	}
 }
 
+/* Check if any panes need to be redrawn. */
+static int
+server_client_any_pane_redraw(struct client *c)
+{
+	struct session		*s = c->session;
+	struct window		*w = s->curw->window;
+	struct window_pane	*wp;
+
+	if (c->flags & CLIENT_REDRAWWINDOW)
+		return (1);
+	TAILQ_FOREACH(wp, &w->panes, entry) {
+		if (wp->flags & (PANE_REDRAW|PANE_REDRAWSCROLLBAR))
+			return (1);
+	}
+	return (0);
+}
+
 /* Check for client redraws. */
 static void
 server_client_check_redraw(struct client *c)
 {
 	struct session		*s = c->session;
 	struct tty		*tty = &c->tty;
-	struct window		*w = c->session->curw->window;
+	struct window		*w = s->curw->window;
 	struct window_pane	*wp;
-	int			 needed, tty_flags, mode = tty->mode;
-	uint64_t		 client_flags = 0;
-	int			 redraw_pane, redraw_scrollbar_only;
-	u_int			 bit = 0;
+	int			 needed, tflags, mode = tty->mode;
 	struct timeval		 tv = { .tv_usec = 1000 };
 	static struct event	 ev;
-	size_t			 left;
+	size_t			 n;
 
 	if (c->flags & (CLIENT_CONTROL|CLIENT_SUSPENDED))
 		return;
 	if (c->flags & CLIENT_ALLREDRAWFLAGS) {
-		log_debug("%s: redraw%s%s%s%s%s%s", c->name,
+		log_debug("%s: redraw%s%s%s%s", c->name,
 		    (c->flags & CLIENT_REDRAWWINDOW) ? " window" : "",
 		    (c->flags & CLIENT_REDRAWSTATUS) ? " status" : "",
 		    (c->flags & CLIENT_REDRAWBORDERS) ? " borders" : "",
-		    (c->flags & CLIENT_REDRAWOVERLAY) ? " overlay" : "",
-		    (c->flags & CLIENT_REDRAWPANES) ? " panes" : "",
-		    (c->flags & CLIENT_REDRAWSCROLLBARS) ? " scrollbars" : "");
+		    (c->flags & CLIENT_REDRAWOVERLAY) ? " overlay" : "");
+	}
+
+	/* Work out if a redraw is actually needed. */
+	needed = 0;
+	if (c->flags & CLIENT_ALLREDRAWFLAGS)
+		needed = 1;
+	else if (server_client_any_pane_redraw(c))
+		needed = 1;
+	if (!needed) {
+		c->flags &= ~CLIENT_STATUSFORCE;
+		return;
 	}
 
 	/*
@@ -2036,126 +2075,71 @@ server_client_check_redraw(struct client *c)
 	 * consumed. We can just add a timer to get out of the event loop and
 	 * end up back here.
 	 */
-	needed = 0;
-	if (c->flags & CLIENT_ALLREDRAWFLAGS)
-		needed = 1;
-	else {
-		TAILQ_FOREACH(wp, &w->panes, entry) {
-			if (wp->flags & PANE_REDRAW) {
-				needed = 1;
-				client_flags |= CLIENT_REDRAWPANES;
-				break;
-			}
-			if (wp->flags & PANE_REDRAWSCROLLBAR) {
-				needed = 1;
-				client_flags |= CLIENT_REDRAWSCROLLBARS;
-				/* no break - later panes may need redraw */
-			}
-		}
-	}
-	if (needed && (left = EVBUFFER_LENGTH(tty->out)) != 0) {
-		log_debug("%s: redraw deferred (%zu left)", c->name, left);
+	n = EVBUFFER_LENGTH(tty->out);
+	if (n != 0 || (tty->flags & TTY_BLOCK)) {
+		if (n != 0)
+			log_debug("%s: redraw deferred (%zu left)", c->name, n);
+		else
+			log_debug("%s: redraw deferred (blocked)", c->name);
 		if (!evtimer_initialized(&ev))
 			evtimer_set(&ev, server_client_redraw_timer, NULL);
 		if (!evtimer_pending(&ev, NULL)) {
 			log_debug("redraw timer started");
 			evtimer_add(&ev, &tv);
 		}
-
-		if (~c->flags & CLIENT_REDRAWWINDOW) {
-			TAILQ_FOREACH(wp, &w->panes, entry) {
-				if (wp->flags & (PANE_REDRAW)) {
-					log_debug("%s: pane %%%u needs redraw",
-					    c->name, wp->id);
-					c->redraw_panes |= (1 << bit);
-				} else if (wp->flags & PANE_REDRAWSCROLLBAR) {
-					log_debug("%s: pane %%%u scrollbar "
-					    "needs redraw", c->name, wp->id);
-					c->redraw_scrollbars |= (1 << bit);
-				}
-				if (++bit == 64) {
-					/*
-					 * If more that 64 panes, give up and
-					 * just redraw the window.
-					 */
-					client_flags &= ~(CLIENT_REDRAWPANES|
-					    CLIENT_REDRAWSCROLLBARS);
-					client_flags |= CLIENT_REDRAWWINDOW;
-					break;
-				}
-			}
-			if (c->redraw_panes != 0)
-				c->flags |= CLIENT_REDRAWPANES;
-			if (c->redraw_scrollbars != 0)
-				c->flags |= CLIENT_REDRAWSCROLLBARS;
-		}
-		c->flags |= client_flags;
+		if (server_client_any_pane_redraw(c))
+			c->flags |= CLIENT_REDRAWWINDOW;
 		return;
-	} else if (needed)
-		log_debug("%s: redraw needed", c->name);
-
-	tty_flags = tty->flags & (TTY_BLOCK|TTY_FREEZE|TTY_NOCURSOR);
-	tty->flags = (tty->flags & ~(TTY_BLOCK|TTY_FREEZE))|TTY_NOCURSOR;
-
-	if (~c->flags & CLIENT_REDRAWWINDOW) {
-		/*
-		 * If not redrawing the entire window, check whether each pane
-		 * needs to be redrawn.
-		 */
-		TAILQ_FOREACH(wp, &w->panes, entry) {
-			redraw_pane = 0;
-			redraw_scrollbar_only = 0;
-			if (wp->flags & PANE_REDRAW)
-				redraw_pane = 1;
-			else if (c->flags & CLIENT_REDRAWPANES) {
-				if (c->redraw_panes & (1 << bit))
-					redraw_pane = 1;
-			} else if (c->flags & CLIENT_REDRAWSCROLLBARS) {
-				if (c->redraw_scrollbars & (1 << bit))
-					redraw_scrollbar_only = 1;
-			}
-			bit++;
-			if (!redraw_pane && !redraw_scrollbar_only)
-				continue;
-			if (redraw_scrollbar_only) {
-				log_debug("%s: redrawing (scrollbar only) pane "
-				    "%%%u", __func__, wp->id);
-			} else {
-				log_debug("%s: redrawing pane %%%u", __func__,
-				    wp->id);
-			}
-			screen_redraw_pane(c, wp, redraw_scrollbar_only);
-		}
-		c->redraw_panes = 0;
-		c->redraw_scrollbars = 0;
-		c->flags &= ~(CLIENT_REDRAWPANES|CLIENT_REDRAWSCROLLBARS);
 	}
 
+	/* Unfreeze the tty and turn off the cursor. */
+	log_debug("%s: redraw needed", c->name);
+	tflags = tty->flags & (TTY_BLOCK|TTY_FREEZE|TTY_NOCURSOR);
+	tty->flags = (tty->flags & ~(TTY_BLOCK|TTY_FREEZE))|TTY_NOCURSOR;
+
+	/*
+	 * If not redrawing the entire window, check whether each pane needs to
+	 * be redrawn.
+	 */
+	if (~c->flags & CLIENT_REDRAWWINDOW) {
+		TAILQ_FOREACH(wp, &w->panes, entry) {
+			if (wp->flags & PANE_REDRAW) {
+				log_debug("%s: redraw pane %%%u", __func__,
+				    wp->id);
+				redraw_pane(c, wp);
+			} else if (wp->flags & PANE_REDRAWSCROLLBAR) {
+				log_debug("%s: redraw scrollbar %%%u", __func__,
+				    wp->id);
+				redraw_pane_scrollbar(c, wp);
+			}
+		}
+	}
+
+	/*
+	 * Set titles etc and do the redraw if there are redraw flags (and we
+	 * aren't here just to redraw panes).
+	 */
 	if (c->flags & CLIENT_ALLREDRAWFLAGS) {
 		if (options_get_number(s->options, "set-titles")) {
 			server_client_set_title(c);
 			server_client_set_path(c);
 		}
 		server_client_set_progress_bar(c);
-		screen_redraw_screen(c);
+		redraw_screen(c);
 	}
 
-	tty->flags = (tty->flags & ~TTY_NOCURSOR)|(tty_flags & TTY_NOCURSOR);
+	/* Put the tty back how it was. */
+	tty->flags = (tty->flags & ~TTY_NOCURSOR)|(tflags & TTY_NOCURSOR);
 	tty_update_mode(tty, mode, NULL);
-	tty->flags = (tty->flags & ~(TTY_BLOCK|TTY_FREEZE|TTY_NOCURSOR))|
-	    tty_flags;
+	tty->flags = (tty->flags & ~(TTY_BLOCK|TTY_FREEZE|TTY_NOCURSOR))|tflags;
 
+	/*
+	 * All the redraw flags can now be cleared. Also record how many bytes
+	 * were written.
+	 */
 	c->flags &= ~(CLIENT_ALLREDRAWFLAGS|CLIENT_STATUSFORCE);
-
-	if (needed) {
-		/*
-		 * We would have deferred the redraw unless the output buffer
-		 * was empty, so we can record how many bytes the redraw
-		 * generated.
-		 */
-		c->redraw = EVBUFFER_LENGTH(tty->out);
-		log_debug("%s: redraw added %zu bytes", c->name, c->redraw);
-	}
+	c->redraw = EVBUFFER_LENGTH(tty->out);
+	log_debug("%s: redraw added %zu bytes", c->name, c->redraw);
 }
 
 /* Set client title. */

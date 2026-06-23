@@ -1,4 +1,4 @@
-/*	$OpenBSD: dev.h,v 1.55 2026/05/26 14:50:52 ratchov Exp $	*/
+/*	$OpenBSD: dev.h,v 1.59 2026/06/22 14:21:14 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -125,6 +125,8 @@ struct ctl {
 #define CTL_OPT_DEV	2
 #define CTL_APP_LEVEL	3
 #define CTL_OPT_MODE	4
+#define CTL_MIDI_PORT	5
+#define CTL_MIDI_THRU	6
 	unsigned int scope;
 	union {
 		struct {
@@ -150,6 +152,10 @@ struct ctl {
 			struct opt *opt;
 			int idx;
 		} opt_mode;
+		struct {
+			struct midithru *midithru;
+			struct port *port;
+		} midi;
 	} u;
 
 	unsigned int addr;		/* slot side control address */
@@ -176,6 +182,7 @@ struct ctlslot {
 	struct ctlops *ops;
 	void *arg;
 	struct opt *opt;
+	struct midithru *midithru;
 	unsigned int self;		/* equal to (1 << index) */
 	unsigned int mode;
 };
@@ -345,7 +352,7 @@ struct ctl *ctl_find(int, void *, void *);
 void ctl_update(struct ctl *);
 int ctl_onval(int, void *, void *, int);
 
-struct ctlslot *ctlslot_new(struct opt *, struct ctlops *, void *);
+struct ctlslot *ctlslot_new(struct opt *, struct midithru *, struct ctlops *, void *);
 void ctlslot_del(struct ctlslot *);
 int ctlslot_visible(struct ctlslot *, struct ctl *);
 struct ctl *ctlslot_lookup(struct ctlslot *, int);

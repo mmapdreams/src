@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.114 2026/02/24 08:20:52 nicm Exp $
+# $OpenBSD: Makefile,v 1.116 2026/06/22 08:47:45 nicm Exp $
 
 PROG=	tmux
 SRCS=	alerts.c \
@@ -125,11 +125,13 @@ SRCS=	alerts.c \
 	tty.c \
 	utf8.c \
 	utf8-combined.c \
+	window-border.c \
 	window-buffer.c \
 	window-client.c \
 	window-clock.c \
 	window-copy.c \
 	window-customize.c \
+	window-visible.c \
 	window-tree.c \
 	window.c \
 	xmalloc.c

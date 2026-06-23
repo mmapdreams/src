@@ -1,4 +1,4 @@
-/*	$OpenBSD: repo.c,v 1.82 2026/06/08 12:12:00 job Exp $ */
+/*	$OpenBSD: repo.c,v 1.85 2026/06/22 08:08:03 job Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -480,9 +480,9 @@ static struct rsyncrepo *
 rsync_get(const char *uri, const char *validdir)
 {
 	struct rsyncrepo *rr;
-	char *repo;
+	char *repo = NULL;
 
-	if ((repo = rsync_base_uri(uri)) == NULL)
+	if (!rsync_base_uri(uri, &repo))
 		errx(1, "bad caRepository URI: %s", uri);
 
 	SLIST_FOREACH(rr, &rsyncrepos, entry)
@@ -1225,9 +1225,9 @@ struct repo *
 repo_lookup(int talid, const char *uri, const char *notify)
 {
 	struct repo	*rp;
-	char		*repouri;
+	char		*repouri = NULL;
 
-	if ((repouri = rsync_base_uri(uri)) == NULL)
+	if (!rsync_base_uri(uri, &repouri))
 		errx(1, "bad caRepository URI: %s", uri);
 
 	/* Look up in repository table. */
@@ -1541,6 +1541,19 @@ repostats_new_files_inc(struct repo *rp, const char *file)
 		rp->repostats.new_files++;
 }
 
+void
+repo_stat_add_nca(struct nonfunc_ca *nca)
+{
+	struct repo *rp;
+
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (rp->id == nca->repoid) {
+			rp->stats[nca->talid].certs_nonfunc++;
+			break;
+		}
+	}
+}
+
 /*
  * Update stats object of repository depending on rtype and subtype.
  */
@@ -1556,10 +1569,6 @@ repo_stat_inc(struct repo *rp, int talid, enum rtype type, enum stype subtype)
 			rp->stats[talid].certs++;
 		if (subtype == STYPE_FAIL)
 			rp->stats[talid].certs_fail++;
-		if (subtype == STYPE_NONFUNC)
-			rp->stats[talid].certs_nonfunc++;
-		if (subtype == STYPE_FUNC)
-			rp->stats[talid].certs_nonfunc--;
 		if (subtype == STYPE_BGPSEC) {
 			rp->stats[talid].certs--;
 			rp->stats[talid].brks++;

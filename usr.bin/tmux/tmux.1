@@ -1,4 +1,4 @@
-.\" $OpenBSD: tmux.1,v 1.1087 2026/06/13 18:06:01 nicm Exp $
+.\" $OpenBSD: tmux.1,v 1.1097 2026/06/22 19:39:01 nicm Exp $
 .\"
 .\" Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 .\"
@@ -14,7 +14,7 @@
 .\" IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 .\" OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: June 13 2026 $
+.Dd $Mdocdate: June 22 2026 $
 .Dt TMUX 1
 .Os
 .Sh NAME
@@ -361,9 +361,13 @@ Kill the current pane.
 .It z
 Toggle zoom state of the current pane.
 .It {
-Swap the current pane with the previous pane.
+Move floating pane to top-left corner.
 .It }
-Swap the current pane with the next pane.
+Move floating pane to top-right corner.
+.It M-{
+Move floating pane to bottom-left corner.
+.It M-}
+Move floating pane to bottom-right corner.
 .It \[ti]
 Show previous messages from
 .Nm ,
@@ -2320,6 +2324,11 @@ that line.
 (emacs: C\-Down)
 .Xc
 Scroll down.
+If
+.Ic mode\-keys
+is
+.Ic vi ,
+the cursor is fixed relative to the text.
 .It Xo
 .Ic scroll\-down\-and\-cancel
 .Xc
@@ -2361,6 +2370,11 @@ that line.
 (emacs: C\-Up)
 .Xc
 Scroll up.
+If
+.Ic mode\-keys
+is
+.Ic vi ,
+the cursor is fixed relative to the text.
 .It Xo
 .Ic search\-again
 (vi: n)
@@ -3303,7 +3317,7 @@ or
 reverses the sort order.
 .Tg movep
 .It Xo Ic move\-pane
-.Op Fl bdfhv
+.Op Fl bdfhMv
 .Op Fl D Op Ar lines
 .Op Fl l Ar size
 .Op Fl L Op Ar columns
@@ -3358,7 +3372,7 @@ which may be one of:
 .It Li "top-left-centre" Ta "Centre of top-left quadrant"
 .It Li "top-right-centre" Ta "Centre of top-right quadrant"
 .It Li "bottom-left-centre" Ta "Centre of bottom-left quadrant"
-.It Li "bottom-right-centre" Ta "Centre of botton-right quadrant"
+.It Li "bottom-right-centre" Ta "Centre of bottom-right quadrant"
 .It Li "front" Ta "Front of floating panes"
 .It Li "back" Ta "Back of floating panes"
 .It Li "forward" Ta "Forward one floating pane"
@@ -3375,6 +3389,10 @@ move it to an absolute position.
 moves the pane to the given
 .Ar z-index ,
 where zero is the front.
+.Pp
+.Fl M
+begins a mouse drag (only valid if bound to a mouse key binding, see
+.Sx MOUSE SUPPORT ) .
 .Tg movew
 .It Xo Ic move\-window
 .Op Fl abrdk
@@ -3480,6 +3498,7 @@ but a different format may be specified with
 .Tg newp
 .It Xo Ic new\-pane
 .Op Fl bdefhIkPvWZ
+.Op Fl B Ar border\-lines
 .Op Fl c Ar start\-directory
 .Op Fl e Ar environment
 .Op Fl F Ar format
@@ -3511,6 +3530,9 @@ sets the border style when the pane is inactive (see
 .Sx STYLES ) .
 .Fl T
 sets the pane title.
+.Fl B
+sets the pane border lines for floating panes; see
+.Ic pane\-border\-lines .
 .Pp
 .Fl h
 does a horizontal split and
@@ -5620,6 +5642,8 @@ simple ASCII characters
 the pane number
 .It spaces
 space characters
+.It none
+no border for floating panes
 .El
 .Pp
 .Ql double
@@ -5628,9 +5652,14 @@ and
 will fall back to standard ACS line drawing when UTF\-8 is not supported.
 .Pp
 .It Xo Ic pane\-border\-status
-.Op Ic off | top | bottom
+.Op Ic off | top | bottom | top\-floating | bottom\-floating
 .Xc
 Turn pane border status lines off or set their position.
+If set to
+.Ic top\-floating
+or
+.Ic bottom\-floating ,
+status lines are shown only on floating panes.
 .Pp
 .It Ic pane\-border\-style Ar style
 Set the pane border style for panes aside from the active pane.
@@ -6350,13 +6379,19 @@ An optional argument specifies flags:
 .Ql r
 means the pattern is a regular expression instead of the default
 .Xr glob 7
-pattern, and
+pattern,
+.Ql z
+means the pattern is a fuzzy match, that is, it matches if its characters
+appear in the string in order but not necessarily consecutively,
+and
 .Ql i
 means to ignore case.
 For example:
 .Ql #{m:*foo*,#{host}}
 or
-.Ql #{m/ri:\[ha]A,MYVAR} .
+.Ql #{m/ri:\[ha]A,MYVAR}
+or
+.Ql #{m/z:abc,aXbXc} .
 A
 .Ql C
 performs a search for a
@@ -6749,6 +6784,7 @@ The following variables are available, where appropriate:
 .It Li "keypad_flag" Ta "" Ta "Pane keypad flag"
 .It Li "last_window_index" Ta "" Ta "Index of last window in session"
 .It Li "line" Ta "" Ta "Line number in the list"
+.It Li "loop_index" Ta "" Ta "Index of item in the W:, P:, S:, or L: loop"
 .It Li "loop_last_flag" Ta "" Ta "1 if last window, pane, session, client in the W:, P:, S:, or L: loop"
 .It Li "mouse_all_flag" Ta "" Ta "Pane mouse all flag"
 .It Li "mouse_any_flag" Ta "" Ta "Pane mouse any flag"
@@ -6986,6 +7022,9 @@ is the terminal alternate character set.
 Align text to the left, centre or right of the available space if appropriate.
 .It Ic fill=colour
 Fill the available space with a background colour if appropriate.
+.It Ic dim=percentage
+Dim foreground and background colours by
+.Ar percentage .
 .It Ic width=N
 Set the width of the styled area.
 .Ar N
