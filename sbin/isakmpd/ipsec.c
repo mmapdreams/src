@@ -1,4 +1,4 @@
-/* $OpenBSD: ipsec.c,v 1.156 2026/06/11 09:46:59 hshoexer Exp $	 */
+/* $OpenBSD: ipsec.c,v 1.159 2026/06/23 13:40:16 hshoexer Exp $	 */
 /* $EOM: ipsec.c,v 1.143 2000/12/11 23:57:42 niklas Exp $	 */
 
 /*
@@ -947,24 +947,34 @@ ipsec_validate_id_information(u_int8_t type, u_int8_t *extra, u_int8_t *buf,
 
 	switch (type) {
 	case IPSEC_ID_IPV4_ADDR:
+		if (sz != sizeof(struct in_addr))
+			return -1;
 		LOG_DBG_BUF((LOG_MESSAGE, 40,
 		    "ipsec_validate_id_information: IPv4", buf,
 		    sizeof(struct in_addr)));
 		break;
 
 	case IPSEC_ID_IPV6_ADDR:
+		if (sz != sizeof(struct in6_addr))
+			return -1;
 		LOG_DBG_BUF((LOG_MESSAGE, 40,
 		    "ipsec_validate_id_information: IPv6", buf,
 		    sizeof(struct in6_addr)));
 		break;
 
 	case IPSEC_ID_IPV4_ADDR_SUBNET:
+	case IPSEC_ID_IPV4_RANGE:
+		if (sz != 2 * sizeof(struct in_addr))
+			return -1;
 		LOG_DBG_BUF((LOG_MESSAGE, 40,
 		    "ipsec_validate_id_information: IPv4 network/netmask",
 		    buf, 2 * sizeof(struct in_addr)));
 		break;
 
 	case IPSEC_ID_IPV6_ADDR_SUBNET:
+	case IPSEC_ID_IPV6_RANGE:
+		if (sz != 2 * sizeof(struct in6_addr))
+			return -1;
 		LOG_DBG_BUF((LOG_MESSAGE, 40,
 		    "ipsec_validate_id_information: IPv6 network/netmask",
 		    buf, 2 * sizeof(struct in6_addr)));
@@ -1283,7 +1293,11 @@ ipsec_is_attribute_incompatible(u_int16_t type, u_int8_t *value, u_int16_t len,
     void *vmsg)
 {
 	struct message *msg = vmsg;
-	u_int16_t dv = decode_16(value);
+	u_int16_t dv;
+
+	if (len < sizeof(dv))
+		return 1;
+	dv = decode_16(value);
 
 	if (msg->exchange->phase == 1) {
 		switch (type) {
@@ -1417,6 +1431,16 @@ ipsec_decode_attribute(u_int16_t type, u_int8_t *value, u_int16_t len,
 	struct exchange *exchange = msg->exchange;
 	struct ipsec_exch *ie = exchange->data;
 	static int      lifetype = 0;
+
+	/* LIFE_DURATION attributes are validated below, so pass them on. */
+	if (len < sizeof(u_int16_t) &&
+	    !(exchange->phase == 1 && type == IKE_ATTR_LIFE_DURATION) &&
+	    !(exchange->phase != 1 && type == IPSEC_ATTR_SA_LIFE_DURATION)) {
+		log_print("ipsec_decode_attribute: too short attribute "
+		    "(type %u, len %u)", type, len);
+		lifetype = 0;
+		return 0;
+	}
 
 	if (exchange->phase == 1) {
 		switch (type) {

@@ -1,4 +1,4 @@
-/* $OpenBSD: window.c,v 1.344 2026/06/22 08:47:46 nicm Exp $ */
+/* $OpenBSD: window.c,v 1.346 2026/06/23 11:29:27 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -2163,6 +2163,15 @@ window_pane_status_get_range(struct window_pane *wp, u_int x, u_int y)
 	 * the stored bounds of the range.
 	 */
 	return (style_ranges_get_range(srs, x - wp->xoff - 2));
+}
+
+enum pane_lines
+window_get_pane_lines(struct window *w)
+{
+	struct options	*oo;
+
+	oo = w->options;
+	return (options_get_number(oo, "pane-border-lines"));
 }
 
 enum pane_lines
