@@ -121,6 +121,10 @@ int	ena_device_init(struct ena_softc *,
 	    struct ena_com_dev_get_features_ctx *);
 int	ena_setup_interrupts(struct ena_softc *, struct pci_attach_args *);
 void	ena_setup_ifp(struct ena_softc *, uint8_t *);
+unsigned int ena_calc_max_io_queues(struct ena_softc *,
+	    struct ena_com_dev_get_features_ctx *);
+int	ena_rss_init(struct ena_softc *);
+void	ena_rss_configure(struct ena_softc *);
 
 /* ena-com platform callbacks (referenced from ena_plat.h). */
 /* ena_dma_alloc / ena_dma_free / ena_rss_key_fill are below. */
@@ -368,13 +372,15 @@ ena_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	/*
-	 * Queue sizing.  v1 uses a single IO queue.  Clamp ring depth to the
-	 * device's advertised maximum and a power of two.
+	 * Queue sizing.  The number of IO queues is bounded by the device's
+	 * advertised maximum, the available MSI-X vectors and the CPU count
+	 * (see ena_setup_interrupts).  Clamp ring depth to a power of two.
 	 */
 	sc->sc_tx_ring_size = ENA_DEFAULT_TX_DESC;
 	sc->sc_rx_ring_size = ENA_DEFAULT_RX_DESC;
 	sc->sc_max_mtu = feat.dev_attr.max_mtu;
 	sc->sc_tx_offload_cap = feat.offload.tx;
+	sc->sc_max_io_queues = ena_calc_max_io_queues(sc, &feat);
 
 	if (ena_setup_interrupts(sc, pa) != 0) {
 		printf(": interrupt setup failed\n");
@@ -514,10 +520,14 @@ ena_setup_interrupts(struct ena_softc *sc, struct pci_attach_args *pa)
 	if (intrstr != NULL)
 		printf(": %s", intrstr);
 
-	/* IO queue vectors over the remaining MSI-X. */
+	/*
+	 * IO queue vectors over the remaining MSI-X.  intrmap clamps the
+	 * count to the CPU count; cap it at the device's IO-queue limit so
+	 * the indirection table and queue creation stay within range.
+	 */
 	nvec = msix - 1;
-	sc->sc_intrmap = intrmap_create(&sc->sc_dev, nvec, 1,
-	    INTRMAP_POWEROF2);
+	sc->sc_intrmap = intrmap_create(&sc->sc_dev, nvec,
+	    sc->sc_max_io_queues, INTRMAP_POWEROF2);
 	sc->sc_nqueues = intrmap_count(sc->sc_intrmap);
 
 	sc->sc_queues = mallocarray(sc->sc_nqueues, sizeof(*sc->sc_queues),
@@ -537,7 +547,7 @@ ena_setup_interrupts(struct ena_softc *sc, struct pci_attach_args *pa)
 
 		if (pci_intr_map_msix(pa, vec, &ih) != 0) {
 			printf(": can't map queue interrupt %d\n", vec);
-			return (1);
+			goto fail;
 		}
 		snprintf(eq->eq_intrname, sizeof(eq->eq_intrname), "%s:%d",
 		    ENA_DEVNAME(sc), i);
@@ -546,7 +556,7 @@ ena_setup_interrupts(struct ena_softc *sc, struct pci_attach_args *pa)
 		    ena_intr_queue, eq, eq->eq_intrname);
 		if (eq->eq_ih == NULL) {
 			printf(": can't establish queue interrupt %d\n", vec);
-			return (1);
+			goto fail;
 		}
 	}
 
@@ -554,6 +564,140 @@ ena_setup_interrupts(struct ena_softc *sc, struct pci_attach_args *pa)
 	ena_com_set_admin_polling_mode(ena_dev, false);
 
 	return (0);
+
+fail:
+	while (i-- > 0) {
+		pci_intr_disestablish(sc->sc_pc, sc->sc_queues[i].eq_ih);
+		timeout_del(&sc->sc_queues[i].eq_rx_refill);
+	}
+	pci_intr_disestablish(sc->sc_pc, sc->sc_admin_ih);
+	sc->sc_admin_ih = NULL;
+	free(sc->sc_queues, M_DEVBUF,
+	    sc->sc_nqueues * sizeof(*sc->sc_queues));
+	sc->sc_queues = NULL;
+	intrmap_destroy(sc->sc_intrmap);
+	sc->sc_intrmap = NULL;
+	sc->sc_nqueues = 0;
+	return (1);
+}
+
+/*
+ * Number of IO queues the device can support.  Mirror the ena-com feature
+ * selection: prefer the "max queue ext" descriptor when the device offers
+ * it, otherwise fall back to the legacy queue feature.  The result still
+ * gets clamped by the MSI-X vector and CPU count in ena_setup_interrupts.
+ */
+unsigned int
+ena_calc_max_io_queues(struct ena_softc *sc,
+    struct ena_com_dev_get_features_ctx *feat)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	unsigned int io_sq, io_cq, n;
+
+	if (ena_dev->supported_features & BIT(ENA_ADMIN_MAX_QUEUES_EXT)) {
+		struct ena_admin_queue_ext_feature_fields *ext =
+		    &feat->max_queue_ext.max_queue_ext;
+
+		io_sq = MIN(ext->max_tx_sq_num, ext->max_rx_sq_num);
+		io_cq = MIN(ext->max_tx_cq_num, ext->max_rx_cq_num);
+	} else {
+		io_sq = feat->max_queues.max_sq_num;
+		io_cq = feat->max_queues.max_cq_num;
+	}
+
+	n = MIN(io_sq, io_cq);
+	n = MIN(n, ENA_MAX_NUM_IO_QUEUES);
+	if (n == 0)
+		n = 1;
+
+	return (n);
+}
+
+/*
+ * Allocate the RSS host resources (indirection table + hash key) once.
+ * Issues admin GET_FEATURE commands, so it is called from ena_rss_configure()
+ * in the ena_init() path where the admin queue is live -- NOT from attach,
+ * where interrupt-driven admin completions are not yet serviced.
+ */
+int
+ena_rss_init(struct ena_softc *sc)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	int rc;
+
+	if (sc->sc_rss_ready)
+		return (0);
+
+	/*
+	 * ena_com_rss_init() issues admin GET_FEATURE commands, so it must run
+	 * with the admin queue live (i.e. from the ena_init path, not attach).
+	 */
+	rc = ena_com_rss_init(ena_dev, ENA_RX_RSS_TABLE_LOG_SIZE);
+	if (rc == 0)
+		sc->sc_rss_ready = 1;
+
+	return (rc);
+}
+
+/*
+ * Program the RSS indirection table and Toeplitz hash into the device.
+ * Must run after ena_create_io_queues(): ena_com_indirect_table_set()
+ * resolves each host entry to a device RX completion queue, which only
+ * exists once the IO queues are created.  Re-run on every ena_init().
+ * Best-effort: log and continue on failure (device keeps its previous,
+ * single-queue-safe defaults).
+ */
+void
+ena_rss_configure(struct ena_softc *sc)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	uint8_t key[ENA_HASH_KEY_SIZE];
+	unsigned int i, tbl_size;
+	int rc;
+
+	if (sc->sc_nqueues <= 1)
+		return;
+
+	/* One-time RSS host allocation; needs a live admin queue. */
+	if (ena_rss_init(sc) != 0) {
+		printf("%s: RSS init failed; RX uses a single queue\n",
+		    ENA_DEVNAME(sc));
+		return;
+	}
+
+	/* Spread the indirection table entries across the active RX queues. */
+	tbl_size = 1U << ENA_RX_RSS_TABLE_LOG_SIZE;
+	for (i = 0; i < tbl_size; i++) {
+		rc = ena_com_indirect_table_fill_entry(ena_dev, i,
+		    ENA_IO_RXQ_IDX(i % sc->sc_nqueues));
+		if (rc != 0) {
+			printf("%s: RSS indirection fill failed: %d\n",
+			    ENA_DEVNAME(sc), rc);
+			return;
+		}
+	}
+
+	rc = ena_com_indirect_table_set(ena_dev);
+	if (rc != 0) {
+		printf("%s: RSS indirection set failed: %d\n",
+		    ENA_DEVNAME(sc), rc);
+		return;
+	}
+
+	/* Symmetric Toeplitz key shared with the stack's flow hashing. */
+	ena_rss_key_fill(key, sizeof(key));
+	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, key,
+	    sizeof(key), 0xffffffff);
+	if (rc != 0) {
+		printf("%s: RSS hash function set failed: %d\n",
+		    ENA_DEVNAME(sc), rc);
+		return;
+	}
+
+	rc = ena_com_set_default_hash_ctrl(ena_dev);
+	if (rc != 0)
+		printf("%s: RSS hash control set failed: %d\n",
+		    ENA_DEVNAME(sc), rc);
 }
 
 void
@@ -732,6 +876,9 @@ ena_init(struct ena_softc *sc)
 		printf("%s: failed to create IO queues\n", ENA_DEVNAME(sc));
 		return (rc);
 	}
+
+	/* Flush the RSS table now that the RX queues exist (best-effort). */
+	ena_rss_configure(sc);
 
 	/* Prime the RX rings before enabling the datapath. */
 	for (i = 0; i < sc->sc_nqueues; i++) {
