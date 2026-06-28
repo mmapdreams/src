@@ -409,8 +409,14 @@ ena_reg_read32(struct ena_bus *bus, bus_size_t offset)
 	ena_reg_read32((struct ena_bus *)(bus), (bus_size_t)(offset))
 
 /*
- * Doorbell / read-mailbox DMA sync.  The HAL only syncs the mmio read-response
- * handle; the glue is responsible for syncing the ring memory itself.
+ * Admin submission-queue DMA sync.  ena-com calls ENA_DB_SYNC() on the admin
+ * SQ before ringing its doorbell (ena_com.c).  Every DMA ring is mapped
+ * BUS_DMA_COHERENT (ena_dma_alloc()), so no per-access bus_dmamap_sync is
+ * needed for coherency: producer/consumer ordering is supplied by the
+ * membar_producer() in ENA_REG_WRITE32() and the HAL's wmb()/dma_rmb().  This
+ * sync is therefore a redundant write-buffer drain, retained only because the
+ * HAL references the macro.  The cacheable streaming mbuf maps are the only
+ * DMA memory that needs real per-access syncs (if_ena.c RX/TX paths).
  */
 #define ENA_DB_SYNC_WRITE(mem_handle) bus_dmamap_sync(			\
 	(mem_handle)->tag, (mem_handle)->map, 0,			\
