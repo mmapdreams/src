@@ -52,11 +52,11 @@
  * (sys/dev/pci/ena-com/) is imported verbatim from upstream; this file is the
  * OpenBSD-native glue (autoconf, PCI/MSI-X, bus_dma, ifnet datapath) over it.
  *
- * v1 scope: single IO queue, host-memory TX placement (no LLQ), and no
- * checksum offload advertised: RX csum results from the device are honoured,
- * but TX offload is held off until the TX metadata descriptor is in place
- * (see ena_setup_ifp()).  Multiqueue/RSS, TSO, LLQ and KSTAT are
- * intentionally staged for follow-up work.
+ * v1 scope: single IO queue, host-memory TX placement (no LLQ).  RX csum
+ * results from the device are honoured, and TX IPv4/TCP/UDP checksum
+ * offload is advertised when the device reports the capability (the L3/L4
+ * metadata descriptor is built per packet in ena_tx_csum()).  Multiqueue/
+ * RSS, TSO, LLQ and KSTAT are intentionally staged for follow-up work.
  */
 
 #include "bpfilter.h"
@@ -79,6 +79,9 @@
 #include <net/toeplitz.h>
 
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <netinet/if_ether.h>
 
 #if NBPFILTER > 0
@@ -144,6 +147,7 @@ void	ena_rx_refill(void *);
 int	ena_rxeof(struct ena_queue *);
 int	ena_txeof(struct ena_queue *);
 int	ena_encap(struct ena_queue *, struct mbuf *);
+void	ena_tx_csum(struct ena_com_tx_ctx *, struct mbuf *);
 int	ena_intr_queue(void *);
 int	ena_intr_admin(void *);
 
@@ -569,17 +573,21 @@ ena_setup_ifp(struct ena_softc *sc, uint8_t *mac)
 	ifp->if_watchdog = ena_watchdog;
 	ifp->if_hardmtu = sc->sc_max_mtu;
 	/*
-	 * No checksum offload.  The device requires a metadata descriptor
-	 * (L3/L4 protocol indices plus header offset/length) to place an
-	 * offloaded checksum; without it the device corrupts every offloaded
-	 * IP/TCP/UDP packet -- on real Nitro hardware the peer then drops all
-	 * IP traffic while ARP (no L3 checksum) still works.  Until the TX
-	 * metadata path is implemented, advertise no IFCAP_CSUM_* so the stack
-	 * computes checksums in software; this gives correct bidirectional
-	 * unicast ICMP and TCP.
+	 * TX checksum offload.  The device places an offloaded checksum only
+	 * when ena_encap() emits a metadata descriptor describing the L3/L4
+	 * protocol and the L3 header offset/length (see ena_tx_csum()); a
+	 * stale or missing descriptor silently corrupts the packet.  OpenBSD
+	 * pre-seeds the L4 pseudo-header checksum (in_proto_cksum_out()), so
+	 * we drive the device in its "partial" L4 mode -- advertise the
+	 * *_CSUM_PART device capabilities, not *_CSUM_FULL.
 	 */
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
-	(void)cap;
+	if (ISSET(cap, ENA_ADMIN_FEATURE_OFFLOAD_DESC_TX_L3_CSUM_IPV4_MASK))
+		ifp->if_capabilities |= IFCAP_CSUM_IPv4;
+	if (ISSET(cap, ENA_ADMIN_FEATURE_OFFLOAD_DESC_TX_L4_IPV4_CSUM_PART_MASK))
+		ifp->if_capabilities |= IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4;
+	if (ISSET(cap, ENA_ADMIN_FEATURE_OFFLOAD_DESC_TX_L4_IPV6_CSUM_PART_MASK))
+		ifp->if_capabilities |= IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
 
 	ifq_init_maxlen(&ifp->if_snd, sc->sc_tx_ring_size);
 
@@ -1125,6 +1133,66 @@ ena_rxeof(struct ena_queue *eq)
  * TX datapath
  * ------------------------------------------------------------------------ */
 
+/*
+ * Build the TX checksum-offload metadata for one packet.  The stack only
+ * leaves M_*_CSUM_OUT set when this interface advertised the matching
+ * IFCAP (in_proto_cksum_out()/in6_proto_cksum_out()/in_hdr_cksum_out()),
+ * the L4 header directly follows the IP header (no IPv4 options, no IPv6
+ * extension headers) and the frame is not bridged; in that case the L4
+ * pseudo-header checksum has already been seeded into the packet, so the
+ * device only completes it ("partial" L4 mode, l4_csum_partial = 1).  When
+ * the headers cannot be parsed we leave meta_valid clear so the packet is
+ * sent without offload rather than corrupted.
+ */
+void
+ena_tx_csum(struct ena_com_tx_ctx *tx_ctx, struct mbuf *m)
+{
+	struct ether_extracted ext;
+	int csum_flags = m->m_pkthdr.csum_flags;
+
+	if (!ISSET(csum_flags, M_IPV4_CSUM_OUT | M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
+		return;
+
+	ether_extract_headers(m, &ext);
+
+	if (ext.ip4 != NULL) {
+		tx_ctx->l3_proto = ENA_ETH_IO_L3_PROTO_IPV4;
+		tx_ctx->l3_csum_enable =
+		    ISSET(csum_flags, M_IPV4_CSUM_OUT) ? 1 : 0;
+		if (ISSET(ext.ip4->ip_off, htons(IP_DF)))
+			tx_ctx->df = 1;
+	} else if (ext.ip6 != NULL) {
+		tx_ctx->l3_proto = ENA_ETH_IO_L3_PROTO_IPV6;
+		tx_ctx->df = 1;
+	} else {
+		/* Not an IP packet we can describe; send without offload. */
+		return;
+	}
+
+	if (ext.tcp != NULL && ISSET(csum_flags, M_TCP_CSUM_OUT)) {
+		tx_ctx->l4_proto = ENA_ETH_IO_L4_PROTO_TCP;
+		tx_ctx->l4_csum_enable = 1;
+		tx_ctx->l4_csum_partial = 1;
+	} else if (ext.udp != NULL && ISSET(csum_flags, M_UDP_CSUM_OUT)) {
+		tx_ctx->l4_proto = ENA_ETH_IO_L4_PROTO_UDP;
+		tx_ctx->l4_csum_enable = 1;
+		tx_ctx->l4_csum_partial = 1;
+	} else {
+		/*
+		 * L3-only offload (IPv4 header checksum), or the L4 header was
+		 * not parsed: the device still needs the L3 metadata to place
+		 * the IPv4 header checksum.
+		 */
+		tx_ctx->l4_proto = ENA_ETH_IO_L4_PROTO_UNKNOWN;
+		tx_ctx->l4_csum_enable = 0;
+	}
+
+	tx_ctx->ena_meta.l3_hdr_offset = ext.evh != NULL ?
+	    ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN : ETHER_HDR_LEN;
+	tx_ctx->ena_meta.l3_hdr_len = ext.iphlen;
+	tx_ctx->meta_valid = 1;
+}
+
 int
 ena_encap(struct ena_queue *eq, struct mbuf *m)
 {
@@ -1163,7 +1231,7 @@ ena_encap(struct ena_queue *eq, struct mbuf *m)
 	tx_ctx.num_bufs = map->dm_nsegs;
 	tx_ctx.req_id = req_id;
 
-	/* No checksum offload (see ena_setup_ifp); the stack fills checksums. */
+	ena_tx_csum(&tx_ctx, m);
 
 	if (!ena_com_sq_have_enough_space(eq->eq_tx_sq,
 	    map->dm_nsegs + 1)) {
