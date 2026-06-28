@@ -68,6 +68,15 @@
 #define ENA_TX_CLEANUP_BUDGET	128
 #define ENA_RX_CLEANUP_BUDGET	256
 
+/*
+ * IO-progress watchdog: consecutive 1Hz ena_tick() passes a TX ring may
+ * have descriptors posted but reap zero completions before the queue is
+ * declared wedged and reset.  Mirrors the keep-alive AENQ's 6s slack; the
+ * keep-alive (admin vector) stays live during an IO-vector stall, so this
+ * is the only liveness check that can see a wedged IO ring.
+ */
+#define ENA_TX_STALL_TICKS	6
+
 #define ENA_RX_REFILL_THRESH_DIVIDER	8
 
 #define ENA_ADMIN_MSIX_VEC	1	/* vector 0 == admin + AENQ */
@@ -136,6 +145,11 @@ struct ena_queue {
 	unsigned int		 eq_tx_ring_size;
 	unsigned int		 eq_tx_prod;	/* next req_id to use */
 	unsigned int		 eq_tx_cons;	/* next completion to reap */
+
+	/* IO-progress watchdog state (ena_tick); see ENA_TX_STALL_TICKS. */
+	uint64_t		 eq_tx_completions; /* reaped TX descs, monotonic */
+	uint64_t		 eq_tx_stall_last;  /* eq_tx_completions at last tick */
+	unsigned int		 eq_tx_stall_ticks; /* ticks stalled w/ TX in flight */
 
 	/* RX */
 	struct ifiqueue		*eq_ifiq;
