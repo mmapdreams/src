@@ -896,6 +896,9 @@ ena_queue_alloc(struct ena_softc *sc, struct ena_queue *eq)
 
 	eq->eq_tx_prod = 0;
 	eq->eq_tx_cons = 0;
+	eq->eq_tx_completions = 0;
+	eq->eq_tx_stall_last = 0;
+	eq->eq_tx_stall_ticks = 0;
 	eq->eq_rx_prod = 0;
 	eq->eq_rx_cons = 0;
 
@@ -1261,6 +1264,8 @@ ena_txeof(struct ena_queue *eq)
 	}
 
 	if (done > 0) {
+		/* Feed the IO-progress watchdog (ena_tick). */
+		eq->eq_tx_completions += done;
 		if (ifq_is_oactive(ifq))
 			ifq_restart(ifq);
 	}
@@ -1314,6 +1319,7 @@ ena_tick(void *arg)
 {
 	struct ena_softc *sc = arg;
 	uint64_t now, timeout;
+	unsigned int i;
 
 	if (!sc->sc_up)
 		return;
@@ -1329,13 +1335,48 @@ ena_tick(void *arg)
 		return;
 	}
 
+	/*
+	 * IO-progress watchdog.  The keep-alive above rides the admin vector,
+	 * which keeps answering while an IO queue is wedged (see
+	 * ena_io_stall_analysis.md), so it cannot see a stalled ring.  Watch
+	 * TX completions instead: TX and RX share one IO MSI-X vector, so a
+	 * wedged queue stops reaping TX completions while descriptors are
+	 * still posted.  RX is not a usable signal here -- an idle RX ring
+	 * legitimately reaps nothing, which would false-trip a reset.  Reads
+	 * are unlocked like the keep-alive check above; a one-tick skew
+	 * against the IO handler is harmless against the multi-tick threshold.
+	 */
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		struct ena_queue *eq = &sc->sc_queues[i];
+		int outstanding = (eq->eq_tx_prod != eq->eq_tx_cons);
+		int progressed = (eq->eq_tx_completions != eq->eq_tx_stall_last);
+
+		if (!outstanding || progressed) {
+			eq->eq_tx_stall_last = eq->eq_tx_completions;
+			eq->eq_tx_stall_ticks = 0;
+			continue;
+		}
+
+		/* TX in flight but no completion reaped since last tick. */
+		if (++eq->eq_tx_stall_ticks >= ENA_TX_STALL_TICKS) {
+			printf("%s: TX queue %u stalled for %us, resetting\n",
+			    ENA_DEVNAME(sc), i, eq->eq_tx_stall_ticks);
+			if (sc->sc_reset_tq != NULL)
+				task_add(sc->sc_reset_tq, &sc->sc_reset_task);
+			return;
+		}
+	}
+
 	timeout_add_sec(&sc->sc_tick, 1);
 }
 
 void
 ena_watchdog(struct ifnet *ifp)
 {
-	/* TX-hang detection is folded into the keep-alive tick for v1. */
+	/*
+	 * Unused: if_timer is never armed.  IO-queue liveness (TX-progress)
+	 * and the keep-alive AENQ are both checked from ena_tick() at 1Hz.
+	 */
 }
 
 void
