@@ -91,6 +91,9 @@
 #define ENA_IO_TXQ_IDX(q)	(2 * (q))
 #define ENA_IO_RXQ_IDX(q)	(2 * (q) + 1)
 
+/* RSS indirection table size, log2 (128 entries, matches the FreeBSD ena). */
+#define ENA_RX_RSS_TABLE_LOG_SIZE	7
+
 #define ENA_DEVNAME(sc)		((sc)->sc_dev.dv_xname)
 
 /*
@@ -185,6 +188,8 @@ struct ena_softc {
 
 	struct intrmap		*sc_intrmap;
 	unsigned int		 sc_nqueues;
+	unsigned int		 sc_max_io_queues;	/* device limit */
+	int			 sc_rss_ready;		/* RSS host state allocated */
 	struct ena_queue	*sc_queues;	/* [sc_nqueues] */
 
 	unsigned int		 sc_tx_ring_size;
