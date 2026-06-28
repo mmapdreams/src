@@ -52,9 +52,11 @@
  * (sys/dev/pci/ena-com/) is imported verbatim from upstream; this file is the
  * OpenBSD-native glue (autoconf, PCI/MSI-X, bus_dma, ifnet datapath) over it.
  *
- * v1 scope: single IO queue, host-memory TX placement (no LLQ), RX/TX with
- * checksum offload negotiated from the device.  Multiqueue/RSS, TSO, LLQ and
- * KSTAT are intentionally staged for follow-up work.
+ * v1 scope: single IO queue, host-memory TX placement (no LLQ), and no
+ * checksum offload advertised: RX csum results from the device are honoured,
+ * but TX offload is held off until the TX metadata descriptor is in place
+ * (see ena_setup_ifp()).  Multiqueue/RSS, TSO, LLQ and KSTAT are
+ * intentionally staged for follow-up work.
  */
 
 #include "bpfilter.h"
