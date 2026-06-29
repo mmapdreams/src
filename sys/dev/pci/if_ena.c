@@ -1397,6 +1397,7 @@ ena_encap(struct ena_queue *eq, struct mbuf *m)
 	}
 
 	tb->etx_mbuf = m;
+	tb->etx_nb_hw_desc = nb_hw_desc;
 	eq->eq_tx_prod = ENA_TX_RING_IDX_NEXT(eq->eq_tx_prod,
 	    eq->eq_tx_ring_size);
 
@@ -1474,7 +1475,7 @@ ena_txeof(struct ena_queue *eq)
 		eq->eq_tx_cons = ENA_TX_RING_IDX_NEXT(eq->eq_tx_cons,
 		    eq->eq_tx_ring_size);
 
-		ena_com_comp_ack(eq->eq_tx_sq, 1);
+		ena_com_comp_ack(eq->eq_tx_sq, tb->etx_nb_hw_desc);
 		done++;
 	}
 

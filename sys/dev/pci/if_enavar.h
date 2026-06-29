@@ -117,6 +117,7 @@ struct ena_tx_buf {
 	struct mbuf		*etx_mbuf;
 	bus_dmamap_t		 etx_map;
 	struct ena_com_buf	 etx_bufs[ENA_PKT_MAX_BUFS];
+	uint16_t		 etx_nb_hw_desc;	/* SQ descriptors posted for this packet */
 };
 
 /* Per-slot software state for an RX descriptor. */
