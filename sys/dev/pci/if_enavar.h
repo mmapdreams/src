@@ -166,6 +166,26 @@ struct ena_queue {
 	unsigned int		 eq_rx_prod;	/* next slot to refill */
 	unsigned int		 eq_rx_cons;	/* next slot to consume */
 	struct mutex		 eq_rx_mtx;
+
+	/*
+	 * Per-queue kstat counters.  Monotonic for the life of the
+	 * device: created in ena_attach, destroyed in ena_detach, and
+	 * deliberately NOT reset by ena_up/ena_stop (unlike eq_tx_completions
+	 * above), so a device reset is observable via eq_kst_resets rather
+	 * than zeroing the very counter that records it.
+	 */
+	uint64_t		 eq_kst_tx_packets;
+	uint64_t		 eq_kst_tx_bytes;
+	uint64_t		 eq_kst_tx_errors;
+	uint64_t		 eq_kst_tx_doorbells;
+	uint64_t		 eq_kst_rx_packets;
+	uint64_t		 eq_kst_rx_bytes;
+	uint64_t		 eq_kst_rx_errors;
+	uint64_t		 eq_kst_rx_nobufs;
+	uint64_t		 eq_kst_rx_doorbells;
+	uint64_t		 eq_kst_resets;
+	struct kstat		*eq_kst_tx;	/* NKSTAT only */
+	struct kstat		*eq_kst_rx;	/* NKSTAT only */
 };
 
 struct ena_softc {
@@ -209,6 +229,9 @@ struct ena_softc {
 	struct taskq		*sc_reset_tq;
 
 	int			 sc_up;		/* IFF_RUNNING shadow */
+
+	/* Serialises the per-queue kstat read callbacks. */
+	struct mutex		 sc_kstat_mtx;
 };
 
 /* if_ena.c */
