@@ -818,18 +818,27 @@ ena_rss_configure(struct ena_softc *sc)
 		return;
 	}
 
-	/* Symmetric Toeplitz key shared with the stack's flow hashing. */
+	/*
+	 * Program the symmetric Toeplitz key shared with the stack's flow
+	 * hashing, then the default hash input fields.  Some ENA VFs (e.g.
+	 * the m5/Nitro generation) advertise the indirection table but not
+	 * the RSS_HASH_FUNCTION/RSS_HASH_INPUT features, so these calls
+	 * return ENA_COM_UNSUPPORTED; that is expected and non-fatal -- the
+	 * device keeps its built-in hash, which still spreads RX across the
+	 * indirection table's queues.  Match the FreeBSD reference driver and
+	 * only treat other errors as failures (sys/dev/ena/ena_rss.c).
+	 */
 	ena_rss_key_fill(key, sizeof(key));
 	rc = ena_com_fill_hash_function(ena_dev, ENA_ADMIN_TOEPLITZ, key,
 	    sizeof(key), 0xffffffff);
-	if (rc != 0) {
+	if (rc != 0 && rc != ENA_COM_UNSUPPORTED) {
 		printf("%s: RSS hash function set failed: %d\n",
 		    ENA_DEVNAME(sc), rc);
 		return;
 	}
 
 	rc = ena_com_set_default_hash_ctrl(ena_dev);
-	if (rc != 0)
+	if (rc != 0 && rc != ENA_COM_UNSUPPORTED)
 		printf("%s: RSS hash control set failed: %d\n",
 		    ENA_DEVNAME(sc), rc);
 }
