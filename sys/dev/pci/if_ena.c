@@ -61,6 +61,7 @@
 
 #include "bpfilter.h"
 #include "vlan.h"
+#include "kstat.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -73,6 +74,7 @@
 #include <sys/task.h>
 #include <sys/atomic.h>
 #include <sys/intrmap.h>
+#include <sys/kstat.h>
 
 #include <net/if.h>
 #include <net/if_media.h>
@@ -165,6 +167,14 @@ void	ena_link_task(void *);
 int	ena_dmamem_alloc(struct ena_softc *, struct ena_dmamem *,
 	    bus_size_t, u_int);
 void	ena_dmamem_free(struct ena_softc *, struct ena_dmamem *);
+
+#if NKSTAT > 0
+/* per-queue statistics (kstat) */
+void	ena_kstat_attach(struct ena_softc *, struct ena_queue *);
+void	ena_kstat_detach(struct ena_queue *);
+int	ena_kstat_tx_read(struct kstat *);
+int	ena_kstat_rx_read(struct kstat *);
+#endif /* NKSTAT > 0 */
 
 const struct pci_matchid ena_devices[] = {
 	{ PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_ENA_PF },
@@ -398,6 +408,22 @@ ena_attach(struct device *parent, struct device *self, void *aux)
 
 	ena_setup_ifp(sc, feat.dev_attr.mac_addr);
 
+#if NKSTAT > 0
+	{
+		/*
+		 * Per-queue statistics.  sc_queues is stable for the life of
+		 * the device (allocated in ena_setup_interrupts, freed in
+		 * ena_detach), so the kstats live from here until ena_detach
+		 * tears them down.
+		 */
+		unsigned int i;
+
+		mtx_init(&sc->sc_kstat_mtx, IPL_SOFTCLOCK);
+		for (i = 0; i < sc->sc_nqueues; i++)
+			ena_kstat_attach(sc, &sc->sc_queues[i]);
+	}
+#endif
+
 	printf(", address %s\n",
 	    ether_sprintf(sc->sc_arpcom.ac_enaddr));
 	return;
@@ -498,8 +524,12 @@ ena_detach(struct device *self, int flags)
 	ena_com_mmio_reg_read_request_destroy(ena_dev);
 
 	/* Release the per-queue interrupts, the queue array and the map. */
-	for (i = 0; i < sc->sc_nqueues; i++)
+	for (i = 0; i < sc->sc_nqueues; i++) {
 		pci_intr_disestablish(sc->sc_pc, sc->sc_queues[i].eq_ih);
+#if NKSTAT > 0
+		ena_kstat_detach(&sc->sc_queues[i]);
+#endif
+	}
 	free(sc->sc_queues, M_DEVBUF,
 	    sc->sc_nqueues * sizeof(*sc->sc_queues));
 	sc->sc_queues = NULL;
@@ -1277,13 +1307,16 @@ ena_rx_fill(struct ena_queue *eq)
 		rb = &eq->eq_rx_buf[req_id];
 
 		m = MCLGETL(NULL, M_DONTWAIT, MCLBYTES);
-		if (m == NULL)
+		if (m == NULL) {
+			eq->eq_kst_rx_nobufs++;
 			break;
+		}
 		m->m_len = m->m_pkthdr.len = MCLBYTES;
 
 		if (bus_dmamap_load_mbuf(sc->sc_dmat, rb->erx_map, m,
 		    BUS_DMA_NOWAIT) != 0) {
 			m_freem(m);
+			eq->eq_kst_rx_nobufs++;
 			break;
 		}
 		bus_dmamap_sync(sc->sc_dmat, rb->erx_map, 0,
@@ -1314,6 +1347,7 @@ ena_rx_fill(struct ena_queue *eq)
 	}
 
 	ena_com_write_sq_doorbell(eq->eq_rx_sq);
+	eq->eq_kst_rx_doorbells++;
 }
 
 void
@@ -1349,8 +1383,10 @@ ena_rxeof(struct ena_queue *eq)
 		rx_ctx.max_bufs = ENA_PKT_MAX_BUFS;
 
 		rc = ena_com_rx_pkt(eq->eq_rx_cq, eq->eq_rx_sq, &rx_ctx);
-		if (rc != 0)
+		if (rc != 0) {
+			eq->eq_kst_rx_errors++;
 			break;
+		}
 		if (rx_ctx.descs == 0)
 			break;
 
@@ -1395,6 +1431,9 @@ ena_rxeof(struct ena_queue *eq)
 			SET(mh->m_pkthdr.csum_flags,
 			    M_TCP_CSUM_IN_OK | M_UDP_CSUM_IN_OK);
 		}
+
+		eq->eq_kst_rx_packets++;
+		eq->eq_kst_rx_bytes += mh->m_pkthdr.len;
 
 		ml_enqueue(&ml, mh);
 	}
@@ -1563,8 +1602,12 @@ ena_start(struct ifqueue *ifq)
 		if (ena_encap(eq, m) != 0) {
 			m_freem(m);
 			ifq->ifq_errors++;
+			eq->eq_kst_tx_errors++;
 			continue;
 		}
+
+		eq->eq_kst_tx_packets++;
+		eq->eq_kst_tx_bytes += m->m_pkthdr.len;
 
 #if NBPFILTER > 0
 		if (ifq->ifq_if->if_bpf != NULL)
@@ -1573,8 +1616,10 @@ ena_start(struct ifqueue *ifq)
 		post = 1;
 	}
 
-	if (post)
+	if (post) {
 		ena_com_write_sq_doorbell(eq->eq_tx_sq);
+		eq->eq_kst_tx_doorbells++;
+	}
 }
 
 int
@@ -1734,12 +1779,171 @@ ena_reset_task(void *arg)
 {
 	struct ena_softc *sc = arg;
 	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	unsigned int i;
 	int s;
 
 	s = splnet();
 	if (ISSET(ifp->if_flags, IFF_RUNNING)) {
+		for (i = 0; i < sc->sc_nqueues; i++)
+			sc->sc_queues[i].eq_kst_resets++;
 		ena_stop(sc);
 		ena_init(sc);
 	}
 	splx(s);
 }
+
+#if NKSTAT > 0
+/* ------------------------------------------------------------------------ *
+ * per-queue statistics (kstat)
+ *
+ * Each IO queue exports two kstats, "ena-txq" and "ena-rxq", keyed by the
+ * queue index.  The counters live in struct ena_queue (eq_kst_*) and are
+ * bumped lock-free from the datapath; the read callbacks below snapshot them
+ * under sc_kstat_mtx, which the kstat framework holds across ks_read.  The
+ * counters are monotonic for the life of the device, so the callbacks assign
+ * (not accumulate) the live values.
+ * ------------------------------------------------------------------------ */
+
+struct ena_txq_kstats {
+	struct kstat_kv		tk_packets;
+	struct kstat_kv		tk_bytes;
+	struct kstat_kv		tk_errors;
+	struct kstat_kv		tk_doorbells;
+	struct kstat_kv		tk_resets;
+};
+
+static const struct ena_txq_kstats ena_txq_kstats_tpl = {
+	KSTAT_KV_UNIT_INITIALIZER("packets",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("bytes",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_BYTES),
+	KSTAT_KV_UNIT_INITIALIZER("errors",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_INITIALIZER("doorbells", KSTAT_KV_T_COUNTER64),
+	KSTAT_KV_INITIALIZER("resets", KSTAT_KV_T_COUNTER64),
+};
+
+struct ena_rxq_kstats {
+	struct kstat_kv		rk_packets;
+	struct kstat_kv		rk_bytes;
+	struct kstat_kv		rk_errors;
+	struct kstat_kv		rk_nobufs;
+	struct kstat_kv		rk_doorbells;
+};
+
+static const struct ena_rxq_kstats ena_rxq_kstats_tpl = {
+	KSTAT_KV_UNIT_INITIALIZER("packets",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("bytes",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_BYTES),
+	KSTAT_KV_UNIT_INITIALIZER("errors",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_UNIT_INITIALIZER("nobufs",
+	    KSTAT_KV_T_COUNTER64, KSTAT_KV_U_PACKETS),
+	KSTAT_KV_INITIALIZER("doorbells", KSTAT_KV_T_COUNTER64),
+};
+
+int
+ena_kstat_tx_read(struct kstat *ks)
+{
+	struct ena_txq_kstats *tk = ks->ks_data;
+	struct ena_queue *eq = ks->ks_softc;
+
+	kstat_kv_u64(&tk->tk_packets) = eq->eq_kst_tx_packets;
+	kstat_kv_u64(&tk->tk_bytes) = eq->eq_kst_tx_bytes;
+	kstat_kv_u64(&tk->tk_errors) = eq->eq_kst_tx_errors;
+	kstat_kv_u64(&tk->tk_doorbells) = eq->eq_kst_tx_doorbells;
+	kstat_kv_u64(&tk->tk_resets) = eq->eq_kst_resets;
+
+	getnanouptime(&ks->ks_updated);
+
+	return (0);
+}
+
+int
+ena_kstat_rx_read(struct kstat *ks)
+{
+	struct ena_rxq_kstats *rk = ks->ks_data;
+	struct ena_queue *eq = ks->ks_softc;
+
+	kstat_kv_u64(&rk->rk_packets) = eq->eq_kst_rx_packets;
+	kstat_kv_u64(&rk->rk_bytes) = eq->eq_kst_rx_bytes;
+	kstat_kv_u64(&rk->rk_errors) = eq->eq_kst_rx_errors;
+	kstat_kv_u64(&rk->rk_nobufs) = eq->eq_kst_rx_nobufs;
+	kstat_kv_u64(&rk->rk_doorbells) = eq->eq_kst_rx_doorbells;
+
+	getnanouptime(&ks->ks_updated);
+
+	return (0);
+}
+
+void
+ena_kstat_attach(struct ena_softc *sc, struct ena_queue *eq)
+{
+	struct kstat *ks;
+	struct ena_txq_kstats *tk;
+	struct ena_rxq_kstats *rk;
+
+	ks = kstat_create(ENA_DEVNAME(sc), 0, "ena-txq", eq->eq_idx,
+	    KSTAT_T_KV, 0);
+	if (ks != NULL) {
+		tk = malloc(sizeof(*tk), M_DEVBUF, M_WAITOK|M_ZERO);
+		*tk = ena_txq_kstats_tpl;
+
+		kstat_set_mutex(ks, &sc->sc_kstat_mtx);
+		ks->ks_softc = eq;
+		ks->ks_data = tk;
+		ks->ks_datalen = sizeof(*tk);
+		ks->ks_read = ena_kstat_tx_read;
+
+		eq->eq_kst_tx = ks;
+		kstat_install(ks);
+	}
+
+	ks = kstat_create(ENA_DEVNAME(sc), 0, "ena-rxq", eq->eq_idx,
+	    KSTAT_T_KV, 0);
+	if (ks != NULL) {
+		rk = malloc(sizeof(*rk), M_DEVBUF, M_WAITOK|M_ZERO);
+		*rk = ena_rxq_kstats_tpl;
+
+		kstat_set_mutex(ks, &sc->sc_kstat_mtx);
+		ks->ks_softc = eq;
+		ks->ks_data = rk;
+		ks->ks_datalen = sizeof(*rk);
+		ks->ks_read = ena_kstat_rx_read;
+
+		eq->eq_kst_rx = ks;
+		kstat_install(ks);
+	}
+}
+
+void
+ena_kstat_detach(struct ena_queue *eq)
+{
+	struct kstat *ks;
+	void *data;
+	size_t datalen;
+
+	/*
+	 * kstat_destroy() frees the kstat object itself but not ks_data, so
+	 * stash the buffer before destroying and free it afterwards.
+	 */
+	ks = eq->eq_kst_tx;
+	if (ks != NULL) {
+		data = ks->ks_data;
+		datalen = ks->ks_datalen;
+		eq->eq_kst_tx = NULL;
+		kstat_destroy(ks);
+		free(data, M_DEVBUF, datalen);
+	}
+
+	ks = eq->eq_kst_rx;
+	if (ks != NULL) {
+		data = ks->ks_data;
+		datalen = ks->ks_datalen;
+		eq->eq_kst_rx = NULL;
+		kstat_destroy(ks);
+		free(data, M_DEVBUF, datalen);
+	}
+}
+#endif /* NKSTAT > 0 */
