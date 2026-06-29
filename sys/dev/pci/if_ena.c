@@ -78,11 +78,14 @@
 
 #include <net/if.h>
 #include <net/if_media.h>
+#include <net/route.h>
 #include <net/toeplitz.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <netinet/tcp_timer.h>
+#include <netinet/tcp_var.h>
 #include <netinet/udp.h>
 #include <netinet/if_ether.h>
 
@@ -875,6 +878,16 @@ ena_setup_ifp(struct ena_softc *sc, uint8_t *mac)
 		ifp->if_capabilities |= IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4;
 	if (ISSET(cap, ENA_ADMIN_FEATURE_OFFLOAD_DESC_TX_L4_IPV6_CSUM_PART_MASK))
 		ifp->if_capabilities |= IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
+#ifndef SMALL_KERNEL
+	/*
+	 * Software LRO (RX TCP coalescing).  The host-side coalescer in
+	 * tcp_softlro_glue() does the work; ena_rxeof() feeds TCP segments
+	 * to it when the IFXF_LRO flag is set.  Advertise the capability
+	 * only; leave the flag off by default (toggled via ifconfig tcplro),
+	 * matching ix(4)/ixl(4).
+	 */
+	ifp->if_capabilities |= IFCAP_LRO;
+#endif
 
 	ifq_init_maxlen(&ifp->if_snd, sc->sc_tx_ring_size);
 
@@ -1374,6 +1387,10 @@ ena_rxeof(struct ena_queue *eq)
 {
 	struct ena_softc *sc = eq->eq_sc;
 	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+#ifndef SMALL_KERNEL
+	struct mbuf_list mltcp = MBUF_LIST_INITIALIZER();
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+#endif
 	struct ena_com_rx_ctx rx_ctx;
 	struct ena_com_rx_buf_info ena_bufs[ENA_PKT_MAX_BUFS];
 	struct mbuf *m, *mh, *mt;
@@ -1444,9 +1461,24 @@ ena_rxeof(struct ena_queue *eq)
 		eq->eq_kst_rx_packets++;
 		eq->eq_kst_rx_bytes += mh->m_pkthdr.len;
 
-		ml_enqueue(&ml, mh);
+#ifndef SMALL_KERNEL
+		/*
+		 * Feed unfragmented TCP segments to the software LRO
+		 * coalescer when enabled; it enqueues onto mltcp itself
+		 * (merging or not).  Everything else goes straight to ml.
+		 */
+		if (ISSET(ifp->if_xflags, IFXF_LRO) &&
+		    rx_ctx.l4_proto == ENA_ETH_IO_L4_PROTO_TCP && !rx_ctx.frag)
+			tcp_softlro_glue(&mltcp, mh, ifp);
+		else
+#endif
+			ml_enqueue(&ml, mh);
 	}
 
+#ifndef SMALL_KERNEL
+	if (ifiq_input(eq->eq_ifiq, &mltcp))
+		if_rxr_livelocked(&eq->eq_rx_ring);
+#endif
 	if (ifiq_input(eq->eq_ifiq, &ml))
 		if_rxr_livelocked(&eq->eq_rx_ring);
 
