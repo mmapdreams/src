@@ -114,6 +114,7 @@ ena_dev_name(void *arg)
 /* autoconf */
 int	ena_match(struct device *, void *, void *);
 void	ena_attach(struct device *, struct device *, void *);
+int	ena_detach(struct device *, int);
 
 /* setup */
 int	ena_map_pci(struct ena_softc *, struct pci_attach_args *);
@@ -173,7 +174,7 @@ const struct pci_matchid ena_devices[] = {
 };
 
 const struct cfattach ena_ca = {
-	sizeof(struct ena_softc), ena_match, ena_attach
+	sizeof(struct ena_softc), ena_match, ena_attach, ena_detach
 };
 
 struct cfdriver ena_cd = {
@@ -409,6 +410,109 @@ free_dev:
 	sc->sc_ena_dev = NULL;
 	bus_space_unmap(sc->sc_bus.reg_bar_t, sc->sc_bus.reg_bar_h,
 	    sc->sc_reg_ios);
+}
+
+int
+ena_detach(struct device *self, int flags)
+{
+	struct ena_softc *sc = (struct ena_softc *)self;
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	unsigned int i;
+
+	/*
+	 * An attach that failed before ena_setup_interrupts left sc_ena_dev
+	 * NULL and fully unwound everything it had allocated (see the
+	 * destroy_dev/free_dev and ena_setup_interrupts fail paths), so there
+	 * is nothing to undo.  Past that point attach is infallible, hence a
+	 * non-NULL sc_ena_dev means the device is fully attached.
+	 */
+	if (ena_dev == NULL)
+		return (0);
+
+	/*
+	 * Quiesce the datapath: clears IFF_RUNNING/sc_up, kills the tick,
+	 * barriers the IO interrupts and tears down the IO queues.
+	 */
+	ena_stop(sc);
+
+	/*
+	 * ena_stop only timeout_del()s the tick and the per-queue RX refill
+	 * timeouts, which does not wait for a callback already running.  Both
+	 * re-arm themselves (ena_tick unconditionally, ena_rx_fill when the RX
+	 * ring is empty), so an in-flight callback can re-queue the timeout
+	 * after ena_stop's timeout_del.  ena_stop has fenced the IO interrupts,
+	 * so the refill can no longer be re-armed from an ISR; the only live
+	 * re-arm source left is the running callback itself.  timeout_del_barrier
+	 * waits it out, then a second timeout_del cancels the entry it re-queued,
+	 * before the softc / queue array backing the timeouts is freed.
+	 */
+	timeout_del_barrier(&sc->sc_tick);
+	timeout_del(&sc->sc_tick);
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		timeout_del_barrier(&sc->sc_queues[i].eq_rx_refill);
+		timeout_del(&sc->sc_queues[i].eq_rx_refill);
+	}
+
+	/*
+	 * The device keeps posting keep-alive AENQs ~1/s regardless of
+	 * IFF_RUNNING, and the admin interrupt handler task_add()s the link
+	 * task.  Stop new admin completions and FLR the device (pure MMIO, no
+	 * admin/AENQ dependency) before tearing the admin path down.
+	 */
+	ena_com_set_admin_running_state(ena_dev, false);
+	ena_com_dev_reset(ena_dev, ENA_REGS_RESET_NORMAL);
+
+	/*
+	 * ena_stop already barriered sc_admin_ih, but a keep-alive AENQ may
+	 * have fired again before the FLR; fence any in-flight admin handler,
+	 * then disestablish it so no further link task can be queued.
+	 */
+	intr_barrier(sc->sc_admin_ih);
+	pci_intr_disestablish(sc->sc_pc, sc->sc_admin_ih);
+	sc->sc_admin_ih = NULL;
+
+	/* The admin handler is dead; drain a possibly-queued link task. */
+	taskq_del_barrier(systq, &sc->sc_link_task);
+	if (sc->sc_reset_tq != NULL) {
+		taskq_destroy(sc->sc_reset_tq);
+		sc->sc_reset_tq = NULL;
+	}
+
+	/* Detach the interface before freeing the resources it can reach. */
+	ifmedia_delete_instance(&sc->sc_media, IFM_INST_ANY);
+	ether_ifdetach(ifp);
+	if_detach(ifp);
+
+	/*
+	 * RSS host state is allocated lazily on the first up; free it (DMA
+	 * memory only, issues no admin commands).
+	 */
+	if (sc->sc_rss_ready) {
+		ena_com_rss_destroy(ena_dev);
+		sc->sc_rss_ready = 0;
+	}
+
+	/* Tear down the admin queues and the mmio readless mechanism. */
+	ena_com_admin_destroy(ena_dev);
+	ena_com_mmio_reg_read_request_destroy(ena_dev);
+
+	/* Release the per-queue interrupts, the queue array and the map. */
+	for (i = 0; i < sc->sc_nqueues; i++)
+		pci_intr_disestablish(sc->sc_pc, sc->sc_queues[i].eq_ih);
+	free(sc->sc_queues, M_DEVBUF,
+	    sc->sc_nqueues * sizeof(*sc->sc_queues));
+	sc->sc_queues = NULL;
+	intrmap_destroy(sc->sc_intrmap);
+	sc->sc_intrmap = NULL;
+	sc->sc_nqueues = 0;
+
+	free(ena_dev, M_DEVBUF, sizeof(*ena_dev));
+	sc->sc_ena_dev = NULL;
+	bus_space_unmap(sc->sc_bus.reg_bar_t, sc->sc_bus.reg_bar_h,
+	    sc->sc_reg_ios);
+
+	return (0);
 }
 
 int
