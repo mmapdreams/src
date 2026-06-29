@@ -777,6 +777,21 @@ ena_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 				ena_stop(sc);
 		}
 		break;
+	case SIOCSIFMTU:
+		if (ifr->ifr_mtu < ENA_MIN_MTU || ifr->ifr_mtu > ifp->if_hardmtu)
+			error = EINVAL;
+		else if (ifp->if_mtu != ifr->ifr_mtu) {
+			int omtu = ifp->if_mtu;
+
+			ifp->if_mtu = ifr->ifr_mtu;
+			/* Reprogram the device MTU via ena_init() when running. */
+			if (ISSET(ifp->if_flags, IFF_RUNNING)) {
+				error = ena_init(sc);
+				if (error != 0)
+					ifp->if_mtu = omtu;
+			}
+		}
+		break;
 	case SIOCGIFMEDIA:
 	case SIOCSIFMEDIA:
 		error = ifmedia_ioctl(ifp, ifr, &sc->sc_media, cmd);
@@ -879,6 +894,21 @@ ena_init(struct ena_softc *sc)
 
 	/* Flush the RSS table now that the RX queues exist (best-effort). */
 	ena_rss_configure(sc);
+
+	/*
+	 * Program the device MTU on every bring-up so the device accepts and
+	 * delivers frames up to ifp->if_mtu (the L3 payload MTU, which is what
+	 * the device expects).  The RX path posts fixed MCLBYTES clusters and
+	 * reassembles a frame that the device scatters across several of them
+	 * (see ena_rxeof), so no RX buffer resizing is needed.  Treat a failure
+	 * as non-fatal -- like the RSS table above -- so a quirky device cannot
+	 * wedge the whole interface; the worst case is that frames larger than
+	 * the device's default MTU are not received.
+	 */
+	rc = ena_com_set_dev_mtu(sc->sc_ena_dev, ifp->if_mtu);
+	if (rc != 0)
+		printf("%s: failed to set device MTU %u\n", ENA_DEVNAME(sc),
+		    ifp->if_mtu);
 
 	/* Prime the RX rings before enabling the datapath. */
 	for (i = 0; i < sc->sc_nqueues; i++) {
