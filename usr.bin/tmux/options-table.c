@@ -1,4 +1,4 @@
-/* $OpenBSD: options-table.c,v 1.218 2026/06/15 17:34:25 nicm Exp $ */
+/* $OpenBSD: options-table.c,v 1.229 2026/06/29 07:45:09 nicm Exp $ */
 
 /*
  * Copyright (c) 2011 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -65,7 +65,7 @@ static const char *options_table_cursor_style_list[] = {
 	"blinking-bar", "bar", NULL
 };
 static const char *options_table_pane_scrollbars_list[] = {
-	"off", "modal", "on", NULL
+	"off", "modal", "on", "auto-hide", NULL
 };
 static const char *options_table_pane_scrollbars_position_list[] = {
 	"right", "left", NULL
@@ -108,6 +108,9 @@ static const char *options_table_extended_keys_format_list[] = {
 };
 static const char *options_table_allow_passthrough_list[] = {
 	"off", "on", "all", NULL
+};
+static const char *options_table_theme_list[] = {
+	"detect", "terminal", "light", "dark", NULL
 };
 static const char *options_table_copy_mode_line_numbers_list[] = {
 	"off", "default", "absolute", "relative", "hybrid", NULL
@@ -271,6 +274,7 @@ const struct options_name_map options_other_names[] = {
 	{ "clock-mode-color", "clock-mode-colour" },
 	{ "cursor-color", "cursor-colour" },
 	{ "prompt-cursor-color", "prompt-cursor-colour" },
+	{ "prompt-command-cursor-color", "prompt-command-cursor-colour" },
 	{ "pane-colors", "pane-colours" },
 	{ NULL, NULL }
 };
@@ -328,9 +332,10 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "cursor-colour",
-	  .type = OPTIONS_TABLE_COLOUR,
+	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
-	  .default_num = -1,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "",
 	  .text = "Colour of the cursor."
 	},
 
@@ -445,7 +450,7 @@ const struct options_table_entry options_table[] = {
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
 	  .flags = OPTIONS_TABLE_IS_STYLE,
-	  .default_str = "default",
+	  .default_str = "bg=themedarkgrey,fg=themewhite",
 	  .separator = ",",
 	  .text = "Default style of menu."
 	},
@@ -454,7 +459,7 @@ const struct options_table_entry options_table[] = {
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
 	  .flags = OPTIONS_TABLE_IS_STYLE,
-	  .default_str = "bg=yellow,fg=black",
+	  .default_str = "bg=themeyellow,fg=themeblack",
 	  .separator = ",",
 	  .text = "Default style of selected menu item."
 	},
@@ -462,7 +467,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "menu-border-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "default",
+	  .default_str = "bg=themedarkgrey,fg=themelightgrey",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Default style of menu borders."
@@ -535,6 +540,175 @@ const struct options_table_entry options_table[] = {
 	  .separator = ",",
 	  .text = "List of terminal features, used if they cannot be "
 		  "automatically detected."
+	},
+
+	{ .name = "theme",
+	  .type = OPTIONS_TABLE_CHOICE,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .choices = options_table_theme_list,
+	  .default_num = 0,
+	  .text = "Whether tmux should detect the terminal theme, use terminal "
+		  "ANSI colours, or force the light or dark theme."
+	},
+
+	{ .name = "dark-theme-black",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray5,black}",
+	  .text = "Dark theme colour for black."
+	},
+
+	{ .name = "dark-theme-white",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray90,white}",
+	  .text = "Dark theme colour for white."
+	},
+
+	{ .name = "dark-theme-light-grey",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray70,white}",
+	  .text = "Dark theme colour for light grey."
+	},
+
+	{ .name = "dark-theme-dark-grey",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray15,black}",
+	  .text = "Dark theme colour for dark grey."
+	},
+
+	{ .name = "dark-theme-green",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},yellowgreen,green}",
+	  .text = "Dark theme colour for green."
+	},
+
+	{ .name = "dark-theme-yellow",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},darkgoldenrod,yellow}",
+	  .text = "Dark theme colour for yellow."
+	},
+
+	{ .name = "dark-theme-red",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},indianred,red}",
+	  .text = "Dark theme colour for red."
+	},
+
+	{ .name = "dark-theme-blue",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},skyblue3,blue}",
+	  .text = "Dark theme colour for blue."
+	},
+
+	{ .name = "dark-theme-cyan",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},cadetblue,cyan}",
+	  .text = "Dark theme colour for cyan."
+	},
+
+	{ .name = "dark-theme-magenta",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},mediumpurple,magenta}",
+	  .text = "Dark theme colour for magenta."
+	},
+
+	{ .name = "light-theme-black",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray10,black}",
+	  .text = "Light theme colour for black."
+	},
+
+	{ .name = "light-theme-white",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray95,white}",
+	  .text = "Light theme colour for white."
+	},
+
+	{ .name = "light-theme-light-grey",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray80,white}",
+	  .text = "Light theme colour for light grey."
+	},
+
+	{ .name = "light-theme-dark-grey",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},gray45,black}",
+	  .text = "Light theme colour for dark grey."
+	},
+
+	{ .name = "light-theme-green",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},seagreen,green}",
+	  .text = "Light theme colour for green."
+	},
+
+	{ .name = "light-theme-yellow",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},darkgoldenrod,yellow}",
+	  .text = "Light theme colour for yellow."
+	},
+
+	{ .name = "light-theme-red",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},indianred4,red}",
+	  .text = "Light theme colour for red."
+	},
+
+	{ .name = "light-theme-blue",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},steelblue,blue}",
+	  .text = "Light theme colour for blue."
+	},
+
+	{ .name = "light-theme-cyan",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},darkcyan,cyan}",
+	  .text = "Light theme colour for cyan."
+	},
+
+	{ .name = "light-theme-magenta",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SERVER,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "#{?#{e|>=:#{client_colours},256},purple4,magenta}",
+	  .text = "Light theme colour for magenta."
 	},
 
 	{ .name = "user-keys",
@@ -635,16 +809,18 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "display-panes-active-colour",
-	  .type = OPTIONS_TABLE_COLOUR,
+	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_num = 1,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "themered",
 	  .text = "Colour of the active pane for 'display-panes'."
 	},
 
 	{ .name = "display-panes-colour",
-	  .type = OPTIONS_TABLE_COLOUR,
+	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_num = 4,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "themeblue",
 	  .text = "Colour of not active panes for 'display-panes'."
 	},
 
@@ -735,7 +911,9 @@ const struct options_table_entry options_table[] = {
 	{ .name = "message-command-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_str = "bg=black,fg=yellow,fill=black",
+	  .default_str = "bg=themeblack,fg=themeyellow,"
+			 "#{?#{m/r:(^|#,)IS(PANE|MODE)($|#,),#{prompt_flags}},,"
+			 "fill=themeblack}",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the command prompt when in command mode, if "
@@ -764,7 +942,9 @@ const struct options_table_entry options_table[] = {
 	{ .name = "message-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_str = "bg=yellow,fg=black,fill=yellow",
+	  .default_str = "bg=themeyellow,fg=themeblack,"
+			 "#{?#{m/r:(^|#,)IS(PANE|MODE)($|#,),#{prompt_flags}},,"
+			 "fill=themeyellow}",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of messages and the command prompt. "
@@ -963,7 +1143,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "status-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_str = "bg=green,fg=black",
+	  .default_str = "bg=themegreen,fg=themeblack",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the status line."
@@ -972,7 +1152,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "pane-status-current-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "default",
+	  .default_str = "underscore",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the current pane in the status line."
@@ -989,10 +1169,20 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "prompt-cursor-colour",
-	  .type = OPTIONS_TABLE_COLOUR,
+	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_num = -1,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "",
 	  .text = "Colour of the cursor when in the command prompt."
+	},
+
+	{ .name = "prompt-command-cursor-colour",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_SESSION,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "",
+	  .text = "Colour of the cursor in the command prompt when in command "
+		  "mode, if 'status-keys' is set to 'vi'."
 	},
 
 	{ .name = "prompt-cursor-style",
@@ -1015,7 +1205,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "session-status-current-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "default",
+	  .default_str = "underscore",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the current session in the status line."
@@ -1143,9 +1333,10 @@ const struct options_table_entry options_table[] = {
 	},
 
 	{ .name = "clock-mode-colour",
-	  .type = OPTIONS_TABLE_COLOUR,
+	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_num = 4,
+	  .flags = OPTIONS_TABLE_IS_COLOUR,
+	  .default_str = "themeblue",
 	  .text = "Colour of the clock in clock mode."
 	},
 
@@ -1160,7 +1351,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "copy-mode-match-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "bg=cyan,fg=black",
+	  .default_str = "bg=themecyan,fg=themeblack",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of search matches in copy mode."
@@ -1169,7 +1360,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "copy-mode-current-match-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "bg=magenta,fg=black",
+	  .default_str = "bg=thememagenta,fg=themeblack",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the current search match in copy mode."
@@ -1178,7 +1369,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "copy-mode-mark-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "bg=red,fg=black",
+	  .default_str = "bg=themeyellow,fg=themeblack",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the marked line in copy mode."
@@ -1217,7 +1408,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "copy-mode-current-line-number-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "fg=yellow",
+	  .default_str = "fg=themeyellow",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of current line number in copy mode."
@@ -1226,7 +1417,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "copy-mode-line-number-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "fg=white,dim",
+	  .default_str = "fg=themelightgrey,dim",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of line numbers in copy mode."
@@ -1275,7 +1466,7 @@ const struct options_table_entry options_table[] = {
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
 	  .flags = OPTIONS_TABLE_IS_STYLE,
-	  .default_str = "noattr,bg=yellow,fg=black",
+	  .default_str = "noattr,bg=themeyellow,fg=themeblack",
 	  .separator = ",",
 	  .text = "Style of indicators and highlighting in modes."
 	},
@@ -1324,7 +1515,9 @@ const struct options_table_entry options_table[] = {
 	{ .name = "pane-active-border-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
-	  .default_str = "#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}",
+	  .default_str = "fg=#{?pane_marked,thememagenta,"
+			 "#{?synchronize-panes,themered,"
+			 "#{?pane_in_mode,themeyellow,themegreen}}}",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the active pane border."
@@ -1383,7 +1576,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "pane-border-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
-	  .default_str = "default",
+	  .default_str = "fg=themelightgrey",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the pane status lines."
@@ -1402,13 +1595,23 @@ const struct options_table_entry options_table[] = {
 	  .scope = OPTIONS_TABLE_WINDOW,
 	  .choices = options_table_pane_scrollbars_list,
 	  .default_num = PANE_SCROLLBARS_OFF,
-	  .text = "Pane scrollbar state."
+	  .text = "Pane scrollbar state: off, on, modal, or auto-hide."
+	},
+
+	{ .name = "pane-scrollbars-timeout",
+	  .type = OPTIONS_TABLE_NUMBER,
+	  .scope = OPTIONS_TABLE_WINDOW,
+	  .minimum = 0,
+	  .maximum = INT_MAX,
+	  .default_num = 500,
+	  .unit = "milliseconds",
+	  .text = "Time before modal and auto-hide pane scrollbars disappear."
 	},
 
 	{ .name = "pane-scrollbars-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
-	  .default_str = "bg=black,fg=white,width=1,pad=0",
+	  .default_str = "bg=themedarkgrey,fg=themelightgrey,width=1,pad=0",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the pane scrollbar."
@@ -1425,7 +1628,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "popup-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "default",
+	  .default_str = "bg=themedarkgrey,fg=themewhite",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Default style of popups."
@@ -1434,7 +1637,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "popup-border-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "default",
+	  .default_str = "bg=themedarkgrey,fg=themelightgrey",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Default style of popup borders."
@@ -1480,6 +1683,15 @@ const struct options_table_entry options_table[] = {
 		  "history when clearing the whole screen."
 	},
 
+	{ .name = "switch-mode-match-style",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
+	  .default_str = "bg=cyan fg=black",
+	  .flags = OPTIONS_TABLE_IS_STYLE,
+	  .separator = ",",
+	  .text = "Style of matched characters in switch mode."
+	},
+
 	{ .name = "synchronize-panes",
 	  .type = OPTIONS_TABLE_FLAG,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
@@ -1497,6 +1709,15 @@ const struct options_table_entry options_table[] = {
 		  "A value of 0 means no limit."
 	},
 
+	{ .name = "tree-mode-border-style",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_WINDOW,
+	  .default_str = "bg=themedarkgrey,fg=themelightgrey",
+	  .flags = OPTIONS_TABLE_IS_STYLE,
+	  .separator = ",",
+	  .text = "Style of borders in tree mode."
+	},
+
 	{ .name = "tree-mode-preview-format",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
@@ -1512,11 +1733,20 @@ const struct options_table_entry options_table[] = {
 	  .default_str = "fg=#{?#{||:"
 			 "#{&&:#{pane_format},#{pane_active}},"
 			 "#{&&:#{window_format},#{window_active}}},"
-			 "#{display-panes-active-colour},"
-			 "#{display-panes-colour}}",
+			 "themered,"
+			 "themeblue}",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of preview indicator in tree mode."
+	},
+
+	{ .name = "tree-mode-selection-style",
+	  .type = OPTIONS_TABLE_STRING,
+	  .scope = OPTIONS_TABLE_WINDOW,
+	  .default_str = "#{E:mode-style}",
+	  .flags = OPTIONS_TABLE_IS_STYLE,
+	  .separator = ",",
+	  .text = "Style of the selected line in tree mode."
 	},
 
 	{ .name = "window-active-style",
@@ -1592,7 +1822,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "window-status-current-style",
 	  .type = OPTIONS_TABLE_STRING,
 	  .scope = OPTIONS_TABLE_WINDOW,
-	  .default_str = "default",
+	  .default_str = "underscore",
 	  .flags = OPTIONS_TABLE_IS_STYLE,
 	  .separator = ",",
 	  .text = "Style of the current window in the status line."
