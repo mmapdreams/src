@@ -1,4 +1,4 @@
-/* $OpenBSD: format.c,v 1.386 2026/06/23 08:35:28 nicm Exp $ */
+/* $OpenBSD: format.c,v 1.389 2026/06/26 14:40:30 nicm Exp $ */
 
 /*
  * Copyright (c) 2011 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1461,6 +1461,33 @@ format_cb_client_cell_width(struct format_tree *ft)
 	if (ft->c != NULL && (ft->c->tty.flags & TTY_STARTED))
 		return (format_printf("%u", ft->c->tty.xpixel));
 	return (NULL);
+}
+
+/* Callback for client_colours. */
+static void *
+format_cb_client_colours(struct format_tree *ft)
+{
+	struct tty_term	*term;
+	u_int		 colours;
+
+	if (ft->c == NULL || (~ft->c->tty.flags & TTY_STARTED))
+		return (NULL);
+	term = ft->c->tty.term;
+
+	if (term->flags & TERM_RGBCOLOURS)
+		colours = 16777216;
+	else if (term->flags & TERM_256COLOURS)
+		colours = 256;
+	else {
+		colours = tty_term_number(term, TTYC_COLORS);
+		if (colours < 8)
+			colours = 2;
+		else if (colours < 16)
+			colours = 8;
+		else
+			colours = 16;
+	}
+	return (format_printf("%u", colours));
 }
 
 /* Callback for client_control_mode. */
@@ -3196,6 +3223,9 @@ static const struct format_table_entry format_table[] = {
 	{ "client_cell_width", FORMAT_TABLE_STRING,
 	  format_cb_client_cell_width
 	},
+	{ "client_colours", FORMAT_TABLE_STRING,
+	  format_cb_client_colours
+	},
 	{ "client_control_mode", FORMAT_TABLE_STRING,
 	  format_cb_client_control_mode
 	},
@@ -4507,51 +4537,45 @@ format_build_modifiers(struct format_expand_state *es, const char **s,
 	return (list);
 }
 
-/* Fuzzy match a single token (no spaces). */
-static int
-format_fuzzy_match_token(const char *pattern, size_t patternlen,
-    const char *text, int icase)
+/* Match using the fuzzy matcher. */
+static char *
+format_match_fuzzy(const char *pattern, const char *text, int positions)
 {
-	const char	*end = pattern + patternlen;
+	struct evbuffer	*buffer;
+	bitstr_t	*bs;
+	char		*value;
+	size_t		 size;
+	u_int		 i, width;
 
-	while (pattern != end) {
-		if (*text == '\0')
-			return (0);
-		if (icase) {
-			if (tolower((u_char)*pattern) == tolower((u_char)*text))
-				pattern++;
-		} else {
-			if (*pattern == *text)
-				pattern++;
-		}
-		text++;
+	width = format_width(text);
+	if (width == 0)
+		width = 1;
+	bs = fuzzy_match(pattern, text, width, NULL);
+	if (bs == NULL)
+		return (xstrdup(positions ? "" : "0"));
+
+	if (!positions) {
+		free(bs);
+		return (xstrdup("1"));
 	}
-	return (1);
-}
 
-/*
- * Fuzzy match strings. The pattern is split on spaces into tokens and every
- * token must match as a sequence.
- */
-static int
-format_fuzzy_match(const char *pattern, const char *text, int icase)
-{
-	const char	*start;
-	size_t		 len;
-
-	while (*pattern != '\0') {
-		while (*pattern == ' ')
-			pattern++;
-		if (*pattern == '\0')
-			break;
-		start = pattern;
-		while (*pattern != '\0' && *pattern != ' ')
-			pattern++;
-		len = pattern - start;
-		if (!format_fuzzy_match_token(start, len, text, icase))
-			return (0);
+	buffer = evbuffer_new();
+	if (buffer == NULL)
+		fatalx("out of memory");
+	for (i = 0; i < width; i++) {
+		if (!bit_test(bs, i))
+			continue;
+		if (EVBUFFER_LENGTH(buffer) != 0)
+			evbuffer_add(buffer, ",", 1);
+		evbuffer_add_printf(buffer, "%u", i);
 	}
-	return (1);
+	if ((size = EVBUFFER_LENGTH(buffer)) != 0)
+		value = xmemdup(EVBUFFER_DATA(buffer), size);
+	else
+		value = xstrdup("");
+	evbuffer_free(buffer);
+	free(bs);
+	return (value);
 }
 
 /* Match against an fnmatch(3) pattern or regular expression. */
@@ -4564,10 +4588,11 @@ format_match(struct format_modifier *fm, const char *pattern, const char *text)
 
 	if (fm->argc >= 1)
 		s = fm->argv[0];
-	if (strchr(s, 'z') != NULL) {
-		if (!format_fuzzy_match(pattern, text, strchr(s, 'i') != NULL))
-			return (xstrdup("0"));
-	} else if (strchr(s, 'r') == NULL) {
+	if (strchr(s, 'p') != NULL)
+		return (format_match_fuzzy(pattern, text, 1));
+	if (strchr(s, 'z') != NULL)
+		return (format_match_fuzzy(pattern, text, 0));
+	if (strchr(s, 'r') == NULL) {
 		if (strchr(s, 'i') != NULL)
 			flags |= FNM_CASEFOLD;
 		if (fnmatch(pattern, text, flags) != 0)

@@ -1,4 +1,4 @@
-/* $OpenBSD: grid.c,v 1.149 2026/06/10 14:29:08 nicm Exp $ */
+/* $OpenBSD: grid.c,v 1.151 2026/06/26 10:29:38 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -86,7 +86,8 @@ grid_need_extended_cell(const struct grid_cell_entry *gce,
 		return (1);
 	if (gc->data.size > 1 || gc->data.width > 1)
 		return (1);
-	if ((gc->fg & COLOUR_FLAG_RGB) || (gc->bg & COLOUR_FLAG_RGB))
+	if ((gc->fg & (COLOUR_FLAG_RGB|COLOUR_FLAG_THEME)) ||
+	    (gc->bg & (COLOUR_FLAG_RGB|COLOUR_FLAG_THEME)))
 		return (1);
 	if (gc->us != 8) /* only supports 256 or RGB */
 		return (1);
@@ -218,7 +219,7 @@ grid_clear_cell(struct grid *gd, u_int px, u_int py, u_int bg, int moved)
 		if (bg != 8)
 			gee->bg = bg;
 	} else if (bg != 8) {
-		if (bg & COLOUR_FLAG_RGB) {
+		if (bg & (COLOUR_FLAG_RGB|COLOUR_FLAG_THEME)) {
 			grid_get_extended_cell(gl, gce, gce->flags);
 			gee = grid_extended_cell(gl, gce, &grid_cleared_cell);
 			gee->bg = bg;
@@ -796,9 +797,16 @@ grid_string_cells_fg(const struct grid_cell *gc, int *values)
 {
 	size_t	n;
 	u_char	r, g, b;
+	int	c;
 
 	n = 0;
-	if (gc->fg & COLOUR_FLAG_256) {
+	if (gc->fg & COLOUR_FLAG_THEME) {
+		c = colour_theme_terminal_colour(gc->fg & 0xff);
+		if (c == 8)
+			values[n++] = 39;
+		else
+			values[n++] = c + 30;
+	} else if (gc->fg & COLOUR_FLAG_256) {
 		values[n++] = 38;
 		values[n++] = 5;
 		values[n++] = gc->fg & 0xff;
@@ -845,9 +853,16 @@ grid_string_cells_bg(const struct grid_cell *gc, int *values)
 {
 	size_t	n;
 	u_char	r, g, b;
+	int	c;
 
 	n = 0;
-	if (gc->bg & COLOUR_FLAG_256) {
+	if (gc->bg & COLOUR_FLAG_THEME) {
+		c = colour_theme_terminal_colour(gc->bg & 0xff);
+		if (c == 8)
+			values[n++] = 49;
+		else
+			values[n++] = c + 40;
+	} else if (gc->bg & COLOUR_FLAG_256) {
 		values[n++] = 48;
 		values[n++] = 5;
 		values[n++] = gc->bg & 0xff;
@@ -894,9 +909,19 @@ grid_string_cells_us(const struct grid_cell *gc, int *values)
 {
 	size_t	n;
 	u_char	r, g, b;
+	int	c;
 
 	n = 0;
-	if (gc->us & COLOUR_FLAG_256) {
+	if (gc->us & COLOUR_FLAG_THEME) {
+		c = colour_theme_terminal_colour(gc->us & 0xff);
+		if (c == 8)
+			values[n++] = 59;
+		else {
+			values[n++] = 58;
+			values[n++] = 5;
+			values[n++] = c;
+		}
+	} else if (gc->us & COLOUR_FLAG_256) {
 		values[n++] = 58;
 		values[n++] = 5;
 		values[n++] = gc->us & 0xff;
