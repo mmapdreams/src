@@ -1,4 +1,6 @@
-#	$OpenBSD: Makefile,v 1.47 2026/06/23 12:13:08 claudio Exp $
+#	$OpenBSD: Makefile,v 1.49 2026/06/27 21:24:47 claudio Exp $
+
+.include <bsd.own.mk>
 
 PROG=	bgpd
 SRCS=	bgpd.c
@@ -39,7 +41,6 @@ SRCS+=	session_bgp.c
 SRCS+=	timer.c
 SRCS+=	util.c
 
-CFLAGS+= -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 CFLAGS+= -Wall -I${.CURDIR}
 CFLAGS+= -Wstrict-prototypes -Wmissing-prototypes
 CFLAGS+= -Wmissing-declarations

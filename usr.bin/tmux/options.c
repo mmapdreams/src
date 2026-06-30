@@ -1,4 +1,4 @@
-/* $OpenBSD: options.c,v 1.82 2026/06/25 16:32:42 nicm Exp $ */
+/* $OpenBSD: options.c,v 1.85 2026/06/29 19:03:34 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1214,6 +1214,17 @@ options_push_changes(const char *name)
 
 	log_debug("%s: %s", __func__, name);
 
+	if (strcmp(name, "theme") == 0 ||
+	    strncmp(name, "dark-theme-", 11) == 0 ||
+	    strncmp(name, "light-theme-", 12) == 0) {
+		TAILQ_FOREACH(loop, &clients, entry) {
+			server_client_update_theme_colours(loop);
+			if (loop->tty.flags & TTY_OPENED)
+				tty_invalidate(&loop->tty);
+			server_redraw_client(loop);
+		}
+	}
+
 	if (strcmp(name, "automatic-rename") == 0) {
 		RB_FOREACH(w, windows, &windows) {
 			if (w->active == NULL)
@@ -1253,6 +1264,7 @@ options_push_changes(const char *name)
 	    strcmp(name, "pane-border-lines") == 0 ||
 	    strcmp(name, "pane-border-status") == 0 ||
 	    strcmp(name, "pane-scrollbars") == 0 ||
+	    strcmp(name, "pane-scrollbars-timeout") == 0 ||
 	    strcmp(name, "pane-scrollbars-position") == 0 ||
 	    strcmp(name, "pane-scrollbars-style") == 0)
 		redraw_invalidate_all_scenes();
@@ -1274,8 +1286,17 @@ options_push_changes(const char *name)
 	if (strcmp(name, "pane-border-status") == 0 ||
 	    strcmp(name, "pane-scrollbars") == 0 ||
 	    strcmp(name, "pane-scrollbars-position") == 0) {
-		RB_FOREACH(w, windows, &windows)
+		RB_FOREACH(w, windows, &windows) {
+			w->sb = options_get_number(w->options,
+			    "pane-scrollbars");
+			w->sb_pos = options_get_number(w->options,
+			    "pane-scrollbars-position");
 			layout_fix_panes(w, NULL);
+		}
+	}
+	if (strcmp(name, "pane-scrollbars") == 0) {
+		RB_FOREACH(wp, window_pane_tree, &all_window_panes)
+			window_pane_scrollbar_hide(wp);
 	}
 	if (strcmp(name, "pane-scrollbars-style") == 0) {
 		RB_FOREACH(wp, window_pane_tree, &all_window_panes) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: nca.c,v 1.2 2026/06/24 09:06:20 job Exp $ */
+/*	$OpenBSD: nca.c,v 1.6 2026/06/27 14:00:09 tb Exp $ */
 /*
  * Copyright (c) 2026 Job Snijders <job@bsd.nl>
  * Copyright (c) 2025 Theo Buehler <tb@openbsd.org>
@@ -16,14 +16,17 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/limits.h>
+#include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "extern.h"
@@ -201,6 +204,10 @@ nca_decide_retry(const struct nca_hist *nca_hist)
 	if ((now - nca_hist->since < 24 * 60 * 60) &&
 	    (now > nca_hist->last_attempt + 90 * 60))
 		return 1;
+
+	/* Add jitter to spread the retries around in time. */
+	if (arc4random() & 0x1)
+		return 0;
 
 	/*
 	 * After 24 hours, settle on retrying only once per day (modulo any
@@ -509,6 +516,7 @@ nca_history_save(struct nca_tree *ncas, time_t buildtime)
 		f = NULL;
 		goto err;
 	}
+	f = NULL;
 
 	ts[0].tv_nsec = UTIME_OMIT;
 	ts[1].tv_sec = buildtime;

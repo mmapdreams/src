@@ -1,4 +1,4 @@
-/* $OpenBSD: window.c,v 1.348 2026/06/25 11:39:12 nicm Exp $ */
+/* $OpenBSD: window.c,v 1.353 2026/06/29 19:03:34 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -73,6 +73,7 @@ struct window_pane_input_data {
 static struct window_pane *window_pane_create(struct window *, u_int, u_int,
 		    u_int);
 static void	window_pane_destroy(struct window_pane *);
+static void	window_pane_scrollbar_timer(int, short, void *);
 static void	window_pane_full_size_offset(struct window_pane *wp,
 		    int *xoff, int *yoff, u_int *sx, u_int *sy);
 
@@ -421,11 +422,11 @@ window_remove_ref(struct window *w, const char *from)
 }
 
 void
-window_set_name(struct window *w, const char *new_name, const char *forbid)
+window_set_name(struct window *w, const char *new_name, int untrusted)
 {
 	char	*name;
 
-	name = clean_name(new_name, forbid);
+	name = clean_name(new_name, untrusted);
 	if (name != NULL) {
 		free(w->name);
 		w->name = name;
@@ -624,6 +625,7 @@ window_redraw_active_switch(struct window *w, struct window_pane *wp)
 			TAILQ_REMOVE(&w->z_index, wp, zentry);
 			TAILQ_INSERT_HEAD(&w->z_index, wp, zentry);
 			wp->flags |= PANE_REDRAW;
+			redraw_invalidate_scene(w);
 		}
 
 		wp = w->active;
@@ -1104,6 +1106,7 @@ window_pane_create(struct window *w, u_int sx, u_int sy, u_int hlimit)
 
 	screen_init(&wp->status_screen, 1, 1, 0);
 	style_ranges_init(&wp->border_status_line.ranges);
+	evtimer_set(&wp->sb_auto_timer, window_pane_scrollbar_timer, wp);
 
 	if (gethostname(host, sizeof host) == 0)
 		screen_set_title(&wp->base, host, 0);
@@ -1151,6 +1154,47 @@ window_pane_free_modes(struct window_pane *wp)
 }
 
 static void
+window_pane_scrollbar_timer(__unused int fd, __unused short events, void *arg)
+{
+	struct window_pane	*wp = arg;
+
+	wp->sb_auto_hover = 0;
+	window_pane_scrollbar_hide(wp);
+}
+
+static int
+window_pane_scrollbar_auto_hide(struct window_pane *wp)
+{
+	return (wp->window->sb == PANE_SCROLLBARS_MODAL ||
+	    wp->window->sb == PANE_SCROLLBARS_AUTOHIDE);
+}
+
+int
+window_pane_scrollbar_overlay_visible(struct window_pane *wp)
+{
+	return (window_pane_scrollbar_overlay(wp) &&
+	    window_pane_scrollbar_visible(wp));
+}
+
+void
+window_pane_scrollbar_redraw(struct window_pane *wp)
+{
+	if (window_pane_scrollbar_overlay_visible(wp)) {
+		wp->flags |= PANE_REDRAW;
+		return;
+	}
+	wp->flags |= PANE_REDRAWSCROLLBAR;
+}
+
+static void
+window_pane_scrollbar_redraw_visibility(struct window_pane *wp)
+{
+	redraw_invalidate_scene(wp->window);
+	wp->flags |= PANE_REDRAW;
+	server_redraw_window(wp->window);
+}
+
+static void
 window_pane_destroy(struct window_pane *wp)
 {
 	window_pane_wait_finish(wp);
@@ -1181,6 +1225,8 @@ window_pane_destroy(struct window_pane *wp)
 		event_del(&wp->resize_timer);
 	if (event_initialized(&wp->sync_timer))
 		event_del(&wp->sync_timer);
+	if (event_initialized(&wp->sb_auto_timer))
+		event_del(&wp->sb_auto_timer);
 	window_pane_clear_resizes(wp, NULL);
 
 	RB_REMOVE(window_pane_tree, &all_window_panes, wp);
@@ -1250,7 +1296,8 @@ window_pane_set_event(struct window_pane *wp)
 }
 
 void
-window_pane_clear_resizes(struct window_pane *wp, struct window_pane_resize *except)
+window_pane_clear_resizes(struct window_pane *wp,
+    struct window_pane_resize *except)
 {
 	struct window_pane_resize	*r, *r1;
 
@@ -1601,6 +1648,12 @@ window_pane_key(struct window_pane *wp, struct client *c, struct session *s,
 
 	wme = TAILQ_FIRST(&wp->modes);
 	if (wme != NULL) {
+		/*
+		 * No mode uses mouse motion events, so drop them here rather
+		 * than passing them on and causing a redraw on every movement.
+		 */
+		if (KEYC_IS_TYPE(key, KEYC_TYPE_MOUSEMOVE))
+			return (0);
 		if (wme->mode->key != NULL && c != NULL) {
 			key &= ~KEYC_MASK_FLAGS;
 			wme->mode->key(wme, c, s, wl, key, m);
@@ -1711,17 +1764,13 @@ window_pane_full_size_offset(struct window_pane *wp, int *xoff, int *yoff,
     u_int *sx, u_int *sy)
 {
 	struct window		*w = wp->window;
-	int			 pane_scrollbars;
-	u_int			 sb_w, sb_pos;
+	u_int			 sb_w;
 
-	pane_scrollbars = options_get_number(w->options, "pane-scrollbars");
-	sb_pos = options_get_number(w->options, "pane-scrollbars-position");
-
-	if (window_pane_show_scrollbar(wp, pane_scrollbars))
+	if (window_pane_scrollbar_reserve(wp))
 		sb_w = wp->scrollbar_style.width + wp->scrollbar_style.pad;
 	else
 		sb_w = 0;
-	if (sb_pos == PANE_SCROLLBARS_LEFT) {
+	if (w->sb_pos == PANE_SCROLLBARS_LEFT) {
 		*xoff = wp->xoff - sb_w;
 		*sx = wp->sx + sb_w;
 	} else { /* sb_pos == PANE_SCROLLBARS_RIGHT */
@@ -2137,17 +2186,91 @@ window_pane_mode(struct window_pane *wp)
 	return (WINDOW_PANE_NO_MODE);
 }
 
-/* Return 1 if scrollbar is or should be displayed. */
 int
-window_pane_show_scrollbar(struct window_pane *wp, int sb_option)
+window_pane_show_scrollbar(struct window_pane *wp)
 {
 	if (SCREEN_IS_ALTERNATE(&wp->base))
 		return (0);
-	if (sb_option == PANE_SCROLLBARS_ALWAYS ||
-	    (sb_option == PANE_SCROLLBARS_MODAL &&
+	if (wp->window->sb == PANE_SCROLLBARS_ALWAYS ||
+	    wp->window->sb == PANE_SCROLLBARS_AUTOHIDE ||
+	    (wp->window->sb == PANE_SCROLLBARS_MODAL &&
 	    window_pane_mode(wp) != WINDOW_PANE_NO_MODE))
 		return (1);
 	return (0);
+}
+
+int
+window_pane_scrollbar_reserve(struct window_pane *wp)
+{
+	if (!window_pane_show_scrollbar(wp))
+		return (0);
+	return (wp->window->sb == PANE_SCROLLBARS_ALWAYS);
+}
+
+int
+window_pane_scrollbar_overlay(struct window_pane *wp)
+{
+	if (!window_pane_show_scrollbar(wp))
+		return (0);
+	return (window_pane_scrollbar_auto_hide(wp));
+}
+
+int
+window_pane_scrollbar_visible(struct window_pane *wp)
+{
+	if (!window_pane_show_scrollbar(wp))
+		return (0);
+	if (!window_pane_scrollbar_auto_hide(wp))
+		return (1);
+	return (wp->sb_auto_visible);
+}
+
+void
+window_pane_scrollbar_start_timer(struct window_pane *wp)
+{
+	struct timeval	tv;
+	u_int		delay;
+
+	if (!window_pane_scrollbar_auto_hide(wp) || !wp->sb_auto_visible)
+		return;
+
+	delay = options_get_number(wp->window->options,
+	    "pane-scrollbars-timeout");
+	tv.tv_sec = delay / 1000;
+	tv.tv_usec = (delay % 1000) * 1000L;
+	evtimer_del(&wp->sb_auto_timer);
+	evtimer_add(&wp->sb_auto_timer, &tv);
+}
+
+void
+window_pane_scrollbar_show(struct window_pane *wp, int start_timer)
+{
+	int	changed = 0;
+	if (!window_pane_scrollbar_auto_hide(wp))
+		return;
+	if (!window_pane_show_scrollbar(wp))
+		return;
+	if (!wp->sb_auto_visible) {
+		wp->sb_auto_visible = 1;
+		changed = 1;
+	}
+	evtimer_del(&wp->sb_auto_timer);
+	if (start_timer)
+		window_pane_scrollbar_start_timer(wp);
+	if (changed)
+		window_pane_scrollbar_redraw_visibility(wp);
+}
+
+void
+window_pane_scrollbar_hide(struct window_pane *wp)
+{
+	if (event_initialized(&wp->sb_auto_timer))
+		evtimer_del(&wp->sb_auto_timer);
+	wp->sb_auto_hover = 0;
+	if (!wp->sb_auto_visible)
+		return;
+	wp->sb_auto_visible = 0;
+	window_pane_scrollbar_redraw_visibility(wp);
 }
 
 int

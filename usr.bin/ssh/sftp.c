@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp.c,v 1.251 2026/05/31 04:51:45 djm Exp $ */
+/* $OpenBSD: sftp.c,v 1.257 2026/06/30 02:30:19 djm Exp $ */
 /*
  * Copyright (c) 2001-2004 Damien Miller <djm@openbsd.org>
  *
@@ -24,6 +24,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <glob.h>
 #include <histedit.h>
 #include <paths.h>
@@ -316,7 +317,6 @@ local_do_shell(const char *args)
 		fatal("Couldn't fork: %s", strerror(errno));
 
 	if (pid == 0) {
-		/* XXX: child has pipe fds to ssh subproc open - issue? */
 		if (args) {
 			debug3("Executing %s -c \"%s\"", shell, args);
 			execl(shell, shell, "-c", args, (char *)NULL);
@@ -889,13 +889,16 @@ do_ls_dir(struct sftp_conn *conn, const char *path,
 			    sftp_can_get_users_groups_by_id(conn)) {
 				char *lname;
 				struct stat sb;
+				const char *user = NULL, *group = NULL;
 
 				memset(&sb, 0, sizeof(sb));
 				attrib_to_stat(&d[n]->a, &sb);
+				if ((lflag & LS_NUMERIC_VIEW) == 0) {
+					user = ruser_name(sb.st_uid);
+					group = rgroup_name(sb.st_gid);
+				}
 				lname = ls_file(fname, &sb, 1,
-				    (lflag & LS_SI_UNITS),
-				    ruser_name(sb.st_uid),
-				    rgroup_name(sb.st_gid));
+				    (lflag & LS_SI_UNITS), user, group);
 				mprintf("%s\n", lname);
 				free(lname);
 			} else
@@ -1022,15 +1025,19 @@ do_globbed_ls(struct sftp_conn *conn, const char *path,
 		i = indices[j];
 		fname = path_strip(g.gl_pathv[i], strip_path);
 		if (lflag & LS_LONG_VIEW) {
+			const char *user = NULL, *group = NULL;
+
 			if (g.gl_statv[i] == NULL) {
 				error("no stat information for %s", fname);
 				free(fname);
 				continue;
 			}
+			if ((lflag & LS_NUMERIC_VIEW) == 0) {
+				user = ruser_name(g.gl_statv[i]->st_uid);
+				group = rgroup_name(g.gl_statv[i]->st_gid);
+			}
 			lname = ls_file(fname, g.gl_statv[i], 1,
-			    (lflag & LS_SI_UNITS),
-			    ruser_name(g.gl_statv[i]->st_uid),
-			    rgroup_name(g.gl_statv[i]->st_gid));
+			    (lflag & LS_SI_UNITS), user, group);
 			mprintf("%s\n", lname);
 			free(lname);
 		} else {
@@ -2269,13 +2276,8 @@ interactive_loop(struct sftp_conn *conn, char *file1, char *file2)
 				return (-1);
 			}
 		} else {
-			/* XXX this is wrong wrt quoting */
-			snprintf(cmd, sizeof cmd, "get%s %s%s%s",
-			    global_aflag ? " -a" : "", dir,
-			    file2 == NULL ? "" : " ",
-			    file2 == NULL ? "" : file2);
-			err = parse_dispatch_command(conn, cmd,
-			    &remote_path, startdir, 1, 0);
+			err = process_get(conn, dir, file2, remote_path, 0, 0,
+			    global_aflag, 0);
 			free(dir);
 			free(startdir);
 			free(remote_path);
@@ -2364,6 +2366,8 @@ connect_to_server(char *path, char **args, int *in, int *out)
 		fatal("socketpair: %s", strerror(errno));
 	*in = *out = inout[0];
 	c_in = c_out = inout[1];
+	FD_CLOSEONEXEC(*in);
+	FD_CLOSEONEXEC(*out);
 
 	if ((sshpid = fork()) == -1)
 		fatal("fork: %s", strerror(errno));

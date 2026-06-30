@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.27 2026/06/23 08:32:55 tb Exp $
+#	$OpenBSD: Makefile,v 1.29 2026/06/26 06:08:08 tb Exp $
 
 PROGS =	constraints verify x509attribute x509req_ext callback
 PROGS += expirecallback callbackfailures x509_asn1 x509_extensions_test
