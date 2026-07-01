@@ -1080,6 +1080,25 @@ ena_init(struct ena_softc *sc)
 	SET(ifp->if_flags, IFF_RUNNING);
 	sc->sc_up = 1;
 
+	/*
+	 * Arm each IO queue's completion interrupt now that the queues exist
+	 * and the datapath is up.  ena_intr_queue() re-arms the vector after
+	 * every pass, but nothing else performs the INITIAL unmask, so without
+	 * this a freshly (re)created completion queue is left masked: the
+	 * device writes TX/RX completions but raises no interrupt, ena_txeof()
+	 * never runs, and TX wedges until a full device reset.  This bites the
+	 * ena_reset_task (ena_stop + ena_init) recovery path, which -- unlike
+	 * attach -- does not reset the device to implicitly re-bootstrap the
+	 * vector.  Use the same rearm as ena_intr_queue().
+	 */
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		struct ena_queue *eq = &sc->sc_queues[i];
+		struct ena_eth_io_intr_reg intr_reg;
+
+		ena_com_update_intr_reg(&intr_reg, 0, 0, true, false);
+		ena_com_unmask_intr(eq->eq_rx_cq, &intr_reg);
+	}
+
 	for (i = 0; i < sc->sc_nqueues; i++) {
 		ifq_clr_oactive(ifp->if_ifqs[i]);
 		ifq_restart(ifp->if_ifqs[i]);
