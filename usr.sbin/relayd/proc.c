@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.c,v 1.57 2026/06/28 05:33:20 rsadowski Exp $	*/
+/*	$OpenBSD: proc.c,v 1.59 2026/07/02 12:35:52 jsg Exp $	*/
 
 /*
  * Copyright (c) 2010 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -249,6 +249,11 @@ proc_accept(struct privsep *ps, int fd, enum privsep_procid dst,
 	struct privsep_pipes	*pp = ps->ps_pp;
 	struct imsgev		*iev;
 
+	if (fd == -1 || dst < 0 || dst >= PROC_MAX ||
+	    n >= ps->ps_instances[dst])
+		fatalx("%s: invalid descriptor target %d instance %u",
+		    __func__, dst, n);
+
 	if (ps->ps_ievs[dst] == NULL) {
 #if DEBUG > 1
 		log_debug("%s: %s src %d %d to dst %d %d not connected",
@@ -259,11 +264,6 @@ proc_accept(struct privsep *ps, int fd, enum privsep_procid dst,
 		close(fd);
 		return;
 	}
-
-	if (fd == -1 || dst < 0 || dst >= PROC_MAX ||
-	    n >= ps->ps_instances[dst])
-		fatalx("%s: invalid descriptor target %d instance %u",
-		    __func__, dst, n);
 
 	if (pp->pp_pipes[dst][n] != -1)
 		fatalx("%s: duplicated descriptor", __func__);
@@ -517,16 +517,12 @@ proc_run(struct privsep *ps, struct privsep_proc *p,
 {
 	struct passwd		*pw;
 	const char		*root;
-	struct control_sock	*rcs;
 
 	log_procinit(p->p_title);
 
 	if (p->p_id == PROC_CONTROL && ps->ps_instance == 0) {
 		if (control_init(ps, &ps->ps_csock) == -1)
 			fatalx("%s: control_init", __func__);
-		TAILQ_FOREACH(rcs, &ps->ps_rcsocks, cs_entry)
-			if (control_init(ps, rcs) == -1)
-				fatalx("%s: control_init", __func__);
 	}
 
 	/* Use non-standard user */
@@ -576,9 +572,6 @@ proc_run(struct privsep *ps, struct privsep_proc *p,
 	if (p->p_id == PROC_CONTROL && ps->ps_instance == 0) {
 		if (control_listen(&ps->ps_csock) == -1)
 			fatalx("%s: control_listen", __func__);
-		TAILQ_FOREACH(rcs, &ps->ps_rcsocks, cs_entry)
-			if (control_listen(rcs) == -1)
-				fatalx("%s: control_listen", __func__);
 	}
 
 	DPRINTF("%s: %s %d/%d, pid %d", __func__, p->p_title,

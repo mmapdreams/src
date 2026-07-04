@@ -1,4 +1,4 @@
-/* $OpenBSD: tmux.h,v 1.1382 2026/06/29 19:03:34 nicm Exp $ */
+/* $OpenBSD: tmux.h,v 1.1387 2026/07/03 22:58:23 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1260,6 +1260,9 @@ struct window_pane {
 #define PANE_UNSEENCHANGES 0x4000
 #define PANE_REDRAWSCROLLBAR 0x8000
 
+	bitstr_t	*sync_dirty;
+	u_int		 sync_dirty_size;
+
 	u_int		 sb_slider_y;
 	u_int		 sb_slider_h;
 	int		 sb_auto_visible;
@@ -2271,14 +2274,24 @@ struct client {
 };
 TAILQ_HEAD(clients, client);
 
-/* Control mode subscription type. */
-enum control_sub_type {
-	CONTROL_SUB_SESSION,
-	CONTROL_SUB_PANE,
-	CONTROL_SUB_ALL_PANES,
-	CONTROL_SUB_WINDOW,
-	CONTROL_SUB_ALL_WINDOWS
+/* Monitor. */
+enum monitor_type {
+	MONITOR_SESSION,
+	MONITOR_PANE,
+	MONITOR_ALL_PANES,
+	MONITOR_WINDOW,
+	MONITOR_ALL_WINDOWS
 };
+struct monitor_change {
+	const char		*name;
+	const char		*value;
+
+	struct client		*c;
+	struct session		*s;
+	struct winlink		*wl;
+	struct window_pane	*wp;
+};
+typedef void (*monitor_cb)(struct monitor_change *, void *);
 
 /* Key binding and key table. */
 struct key_binding {
@@ -3254,6 +3267,7 @@ void	 colour_split_rgb(int, u_char *, u_char *, u_char *);
 int	 colour_force_rgb(int);
 int	 colour_dim(int, u_int);
 const char *colour_tostring(int);
+const char *colour_toescape(struct client *, int, int);
 enum client_theme colour_totheme(int);
 int	 colour_fromstring(const char *);
 const char *colour_theme_option(u_int, enum client_theme);
@@ -3287,6 +3301,9 @@ struct grid *grid_create(u_int, u_int, u_int);
 void	 grid_destroy(struct grid *);
 void	 grid_free_lines(struct grid *, u_int, u_int);
 int	 grid_compare(struct grid *, struct grid *);
+const char *grid_line_flags_string(int);
+const char *grid_cell_flags_string(int);
+const char *grid_cell_attr_string(int);
 void	 grid_collect_history(struct grid *, int);
 void	 grid_remove_history(struct grid *, u_int );
 void	 grid_scroll_history(struct grid *, u_int);
@@ -3395,6 +3412,7 @@ void	 screen_write_mode_set(struct screen_write_ctx *, int);
 void	 screen_write_mode_clear(struct screen_write_ctx *, int);
 void	 screen_write_start_sync(struct window_pane *);
 void	 screen_write_stop_sync(struct window_pane *);
+void	 screen_write_clear_dirty(struct window_pane *);
 void	 screen_write_cursorup(struct screen_write_ctx *, u_int);
 void	 screen_write_cursordown(struct screen_write_ctx *, u_int);
 void	 screen_write_cursorright(struct screen_write_ctx *, u_int);
@@ -3625,7 +3643,7 @@ struct visible_ranges *window_visible_ranges(struct window_pane *, int, int,
 /* layout.c */
 u_int		 layout_count_cells(struct layout_cell *);
 struct layout_cell *layout_create_cell(struct layout_cell *);
-void		 layout_free_cell(struct layout_cell *);
+void		 layout_free_cell(struct layout_cell *, int);
 void		 layout_print_cell(struct layout_cell *, const char *, u_int);
 void		 layout_destroy_cell(struct window *, struct layout_cell *,
 		     struct layout_cell **);
@@ -3636,6 +3654,7 @@ void             layout_set_size(struct layout_cell *, u_int, u_int, int, int);
 void		 layout_make_leaf(struct layout_cell *, struct window_pane *);
 void		 layout_make_node(struct layout_cell *, enum layout_type);
 void		 layout_fix_zindexes(struct window *, struct layout_cell *);
+int		 layout_cell_is_tiled(struct layout_cell *);
 void		 layout_fix_offsets(struct window *);
 void		 layout_fix_panes(struct window *, struct window_pane *);
 void		 layout_resize_adjust(struct window *, struct layout_cell *,
@@ -3644,7 +3663,7 @@ void		 layout_resize_set_size(struct window *, struct layout_cell *,
 		     enum layout_type, u_int);
 struct layout_cell *layout_cell_get_neighbour(struct layout_cell *);
 void		 layout_init(struct window *, struct window_pane *);
-void		 layout_free(struct window *);
+void		 layout_free(struct window *, int);
 void		 layout_resize(struct window *, u_int, u_int);
 void		 layout_resize_pane(struct window_pane *, enum layout_type,
 		     int, int);
@@ -3785,6 +3804,13 @@ void	 check_window_name(struct window *);
 char	*default_window_name(struct window *);
 char	*parse_window_name(const char *);
 
+/* monitor.c */
+struct monitor_set *monitor_create(struct client *, monitor_cb, void *);
+void	monitor_destroy(struct monitor_set *);
+void	monitor_add(struct monitor_set *, const char *, enum monitor_type, int,
+	    const char *);
+void	monitor_remove(struct monitor_set *, const char *);
+
 /* control.c */
 void	control_discard(struct client *);
 void	control_start(struct client *);
@@ -3800,8 +3826,8 @@ void	control_reset_offsets(struct client *);
 void printflike(2, 3) control_write(struct client *, const char *, ...);
 void	control_write_output(struct client *, struct window_pane *);
 int	control_all_done(struct client *);
-void	control_add_sub(struct client *, const char *, enum control_sub_type,
-    	   int, const char *);
+void	control_add_sub(struct client *, const char *, enum monitor_type, int,
+	    const char *);
 void	control_remove_sub(struct client *, const char *);
 
 /* control-notify.c */

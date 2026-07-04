@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.h,v 1.354 2026/06/24 18:56:53 claudio Exp $ */
+/*	$OpenBSD: rde.h,v 1.356 2026/07/02 07:40:12 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org> and
@@ -42,14 +42,15 @@ LIST_HEAD(prefix_list, prefix);
 TAILQ_HEAD(prefix_queue, prefix);
 RB_HEAD(rib_tree, rib_entry);
 TAILQ_HEAD(rib_queue, rib_entry);
-LIST_HEAD(rib_pq_head, rib_pq);
+struct pq_entry;
+TAILQ_HEAD(pq_head, pq_entry);
 
 struct rib_entry {
 	RB_ENTRY(rib_entry)	 rib_e;
 	TAILQ_ENTRY(rib_entry)	 rib_queue;
 	struct prefix_queue	 prefix_h;
 	struct pt_entry		*prefix;
-	struct rib_pq_head	 rib_pq_list;
+	struct pq_head		 pq_head;
 	uint32_t		 pq_peer_id;
 	uint16_t		 rib_id;
 	uint8_t			 lock;
@@ -420,8 +421,8 @@ struct rde_peer	*peer_add(uint32_t, struct peer_config *, struct filter_head *);
 struct rde_filter	*peer_apply_out_filter(struct rde_peer *,
 			    struct filter_head *);
 
-void		 rde_enqueue_updates(struct rib_entry *, struct prefix *,
-		    uint32_t, enum eval_mode);
+void		 rde_enqueue_updates(struct rib_entry *, struct rde_peer *,
+		    struct prefix *, uint32_t, enum eval_mode);
 void		 peer_process_updates(struct rde_peer *, void *);
 
 void		 peer_up(struct rde_peer *, struct session_up *);
@@ -638,7 +639,9 @@ int		 rib_dump_subtree(uint16_t, struct bgpd_addr *, uint8_t,
 		    void (*)(void *, uint8_t),
 		    int (*)(void *));
 void		 rib_dump_terminate(void *);
-void		 rib_dequeue(struct rib_entry *);
+void		 rib_pq_enqueue(struct rib_entry *, struct rde_peer *,
+		    uint32_t, struct prefix *);
+void		 rib_pq_dequeue(struct rib_entry *);
 
 extern struct rib flowrib;
 
