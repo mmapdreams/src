@@ -1,4 +1,4 @@
-/*	$OpenBSD: relay.c,v 1.265 2026/06/15 11:02:13 rsadowski Exp $	*/
+/*	$OpenBSD: relay.c,v 1.271 2026/08/12 19:24:02 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -359,14 +359,17 @@ relay_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 void
 relay_session_publish(struct rsession *s)
 {
-	proc_compose(env->sc_ps, PROC_PFE, IMSG_SESS_PUBLISH, s, sizeof(*s));
+	if (proc_compose(env->sc_ps, PROC_PFE, IMSG_SESS_PUBLISH, s,
+	    sizeof(*s)) == -1)
+		log_warn("%s: proc_compose", __func__);
 }
 
 void
 relay_session_unpublish(struct rsession *s)
 {
-	proc_compose(env->sc_ps, PROC_PFE, IMSG_SESS_UNPUBLISH,
-	    &s->se_id, sizeof(s->se_id));
+	if (proc_compose(env->sc_ps, PROC_PFE, IMSG_SESS_UNPUBLISH,
+	    &s->se_id, sizeof(s->se_id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 }
 
 void
@@ -417,8 +420,9 @@ relay_statistics(int fd, short events, void *arg)
 
 		crs.id = rlay->rl_conf.id;
 		crs.proc = ps->ps_instance;
-		proc_compose(env->sc_ps, PROC_PFE, IMSG_STATISTICS,
-		    &crs, sizeof(crs));
+		if (proc_compose(env->sc_ps, PROC_PFE, IMSG_STATISTICS, &crs,
+		    sizeof(crs)) == -1)
+			log_warn("%s: proc_compose", __func__);
 
 		for (con = SPLAY_ROOT(&rlay->rl_sessions);
 		    con != NULL; con = next_con) {
@@ -724,7 +728,7 @@ relay_connected(int fd, short sig, void *arg)
 		return;
 	}
 
-	DPRINTF("%s: session %d: successful", __func__, con->se_id);
+	log_debug("%s: session %d: successful", __func__, con->se_id);
 
 	/* Log destination if it was changed in a keep-alive connection */
 	if ((con->se_table != con->se_table0) &&
@@ -951,7 +955,7 @@ relay_splice(struct ctl_relay_event *cre)
 		return (0);
 
 	if (!(cre->toread == TOREAD_UNLIMITED || cre->toread > 0)) {
-		DPRINTF("%s: session %d: splice dir %d, nothing to read %lld",
+		log_debug("%s: session %d: splice dir %d, nothing to read %lld",
 		    __func__, con->se_id, cre->dir, cre->toread);
 		return (0);
 	}
@@ -959,7 +963,7 @@ relay_splice(struct ctl_relay_event *cre)
 	/* do not splice before buffers have not been completely flushed */
 	if (EVBUFFER_LENGTH(cre->bev->input) ||
 	    EVBUFFER_LENGTH(cre->dst->bev->output)) {
-		DPRINTF("%s: session %d: splice dir %d, dirty buffer",
+		log_debug("%s: session %d: splice dir %d, dirty buffer",
 		    __func__, con->se_id, cre->dir);
 		bufferevent_disable(cre->bev, EV_READ);
 		return (0);
@@ -977,7 +981,7 @@ relay_splice(struct ctl_relay_event *cre)
 	cre->splicelen = 0;
 	bufferevent_enable(cre->bev, EV_READ);
 
-	DPRINTF("%s: session %d: splice dir %d, maximum %lld, successful",
+	log_debug("%s: session %d: splice dir %d, maximum %lld, successful",
 	    __func__, con->se_id, cre->dir, cre->toread);
 
 	return (1);
@@ -1000,7 +1004,7 @@ relay_splicelen(struct ctl_relay_event *cre)
 		return (-1);
 	}
 
-	DPRINTF("%s: session %d: splice dir %d, length %lld",
+	log_debug("%s: session %d: splice dir %d, length %lld",
 	    __func__, con->se_id, cre->dir, len);
 
 	if (len > cre->splicelen) {
@@ -1034,7 +1038,7 @@ relay_error(struct bufferevent *bev, short error, void *arg)
 	struct rsession		*con = cre->con;
 	struct evbuffer		*dst;
 
-	DPRINTF("%s: session %d: dir %d state %d to read %lld event error %x",
+	log_debug("%s: session %d: dir %d state %d to read %lld event error %x",
 	    __func__, con->se_id, cre->dir, cre->state, cre->toread, error);
 	if (error & EVBUFFER_TIMEOUT) {
 		if (cre->splicelen >= 0) {
@@ -1132,7 +1136,7 @@ relay_accept(int fd, short event, void *arg)
 
 			event_del(&rlay->rl_ev);
 			evtimer_add(&rlay->rl_evt, &evtpause);
-			log_debug("%s: deferring connections", __func__);
+			log_warn("%s: deferring connections", __func__);
 		}
 		return;
 	}
@@ -1233,8 +1237,9 @@ relay_accept(int fd, short event, void *arg)
 		memcpy(&cnl->src, &con->se_in.ss, sizeof(cnl->src));
 		memcpy(&cnl->dst, &con->se_sockname, sizeof(cnl->dst));
 
-		proc_compose(env->sc_ps, PROC_PFE, IMSG_NATLOOK,
-		    cnl, sizeof(*cnl));
+		if (proc_compose(env->sc_ps, PROC_PFE, IMSG_NATLOOK,
+		    cnl, sizeof(*cnl)) == -1)
+			log_warn("%s: proc_compose", __func__);
 
 		/* Schedule timeout */
 		evtimer_set(&con->se_ev, relay_natlook, con);
@@ -1367,7 +1372,7 @@ relay_from_table(struct rsession *con)
 
 			host = rlt->rlt_host[idx];
 
-			DPRINTF("%s: session %d: table %s host %s, "
+			log_debug("%s: session %d: table %s host %s, "
 			    "p 0x%016llx, idx %d, cnt %d, max %d",
 			    __func__, con->se_id, table->conf.name,
 			    host->conf.name, p, idx, cnt, maxtries);
@@ -1379,20 +1384,20 @@ relay_from_table(struct rsession *con)
 	} else {
 		/* handle all non-hashing algorithms */
 		host = rlt->rlt_host[idx];
-		DPRINTF("%s: session %d: table %s host %s, p 0x%016llx, idx %d",
+		log_debug("%s: session %d: table %s host %s, p 0x%016llx, idx %d",
 		    __func__, con->se_id, table->conf.name, host->conf.name,
 		    p, idx);
 	}
 
 	while (host != NULL) {
-		DPRINTF("%s: session %d: host %s", __func__,
+		log_debug("%s: session %d: host %s", __func__,
 		    con->se_id, host->conf.name);
 		if (!table->conf.check || host->up == HOST_UP)
 			goto found;
 		host = TAILQ_NEXT(host, entry);
 	}
 	TAILQ_FOREACH(host, &table->hosts, entry) {
-		DPRINTF("%s: session %d: next host %s",
+		log_debug("%s: session %d: next host %s",
 		    __func__, con->se_id, host->conf.name);
 		if (!table->conf.check || host->up == HOST_UP)
 			goto found;
@@ -1492,8 +1497,9 @@ relay_bindanyreq(struct rsession *con, in_port_t port, int proto)
 	bnd.bnd_port = port;
 	bnd.bnd_proto = proto;
 	bcopy(&con->se_in.ss, &bnd.bnd_ss, sizeof(bnd.bnd_ss));
-	proc_compose(env->sc_ps, PROC_PARENT, IMSG_BINDANY,
-	    &bnd, sizeof(bnd));
+	if (proc_compose(env->sc_ps, PROC_PARENT, IMSG_BINDANY,
+	    &bnd, sizeof(bnd)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	/* Schedule timeout */
 	evtimer_set(&con->se_ev, relay_bindany, con);
@@ -1518,7 +1524,7 @@ void
 relay_connect_state(struct rsession *con, struct ctl_relay_event *cre,
     enum relay_state new)
 {
-	DPRINTF("%s: session %d: %s state %s -> %s",
+	log_debug("%s: session %d: %s state %s -> %s",
 	    __func__, con->se_id,
 	    cre->dir == RELAY_DIR_REQUEST ? "accept" : "connect",
 	    relay_state(cre->state), relay_state(new));
@@ -1538,7 +1544,7 @@ relay_connect_retry(int fd, short sig, void *arg)
 		relay_inflight = 1;
 	}
 
-	DPRINTF("%s: retry %d of %d, inflight: %d", __func__,
+	log_debug("%s: retry %d of %d, inflight: %d", __func__,
 	    con->se_retrycount, con->se_retry, relay_inflight);
 
 	if (sig != EV_TIMEOUT)
@@ -1551,7 +1557,7 @@ relay_connect_retry(int fd, short sig, void *arg)
 	 * available: client could have closed it while we were waiting?
 	 */
 
-	DPRINTF("%s: got EV_TIMEOUT", __func__);
+	log_debug("%s: got EV_TIMEOUT", __func__);
 
 	if (getdtablecount() + FD_RESERVE +
 	    relay_inflight > getdtablesize()) {
@@ -1573,6 +1579,9 @@ relay_connect_retry(int fd, short sig, void *arg)
  retry:
 	if ((con->se_out.s = relay_socket_connect(&con->se_out.ss,
 	    con->se_out.port, rlay->rl_proto, bnds)) == -1) {
+		if (errno == ENFILE || errno == EMFILE)
+			log_warn("%s: session %d: deferring forward",
+			    __func__, con->se_id);
 		log_debug("%s: session %d: "
 		    "forward failed: %s, %s", __func__,
 		    con->se_id, strerror(errno),
@@ -1598,7 +1607,7 @@ relay_connect_retry(int fd, short sig, void *arg)
 	else
 		relay_connect_state(con, &con->se_out, STATE_CONNECTED);
 	relay_inflight--;
-	DPRINTF("%s: inflight decremented, now %d", __func__, relay_inflight);
+	log_debug("%s: inflight decremented, now %d", __func__, relay_inflight);
 
 	event_add(&rlay->rl_ev, NULL);
 
@@ -1695,8 +1704,8 @@ relay_connect(struct rsession *con)
 	if ((con->se_out.s = relay_socket_connect(&con->se_out.ss,
 	    con->se_out.port, rlay->rl_proto, bnds)) == -1) {
 		if (errno == ENFILE || errno == EMFILE) {
-			log_debug("%s: session %d: forward failed: %s",
-			    __func__, con->se_id, strerror(errno));
+			log_warn("%s: session %d: deferring forward",
+			    __func__, con->se_id);
 			evtimer_set(&con->se_inflightevt, relay_connect_retry,
 			    con);
 			event_del(&rlay->rl_ev);
@@ -1724,7 +1733,7 @@ relay_connect(struct rsession *con)
 
 	relay_connect_state(con, &con->se_out, STATE_CONNECTED);
 	relay_inflight--;
-	DPRINTF("%s: inflight decremented, now %d", __func__,
+	log_debug("%s: inflight decremented, now %d", __func__,
 	    relay_inflight);
 
 	if (errno == EINPROGRESS)
@@ -1815,8 +1824,9 @@ relay_close(struct rsession *con, const char *msg, int err)
 
 	if (con->se_cnl != NULL) {
 #if 0
-		proc_compose_imsg(env->sc_ps, PROC_PFE, -1, IMSG_KILLSTATES, -1,
-		    cnl, sizeof(*cnl));
+		if (proc_compose_imsg(env->sc_ps, PROC_PFE, -1,
+		    IMSG_KILLSTATES, -1, cnl, sizeof(*cnl)) == -1)
+			log_warn("%s: proc_compose_imsg", __func__);
 #endif
 		free(con->se_cnl);
 	}
@@ -1870,7 +1880,8 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 
 	switch (imsg_get_type(imsg)) {
 	case IMSG_HOST_DISABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((host = host_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		if ((table = table_find(env, host->conf.tableid)) ==
@@ -1882,14 +1893,16 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		host->up = HOST_UNKNOWN;
 		break;
 	case IMSG_HOST_ENABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((host = host_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		host->flags &= ~(F_DISABLE);
 		host->up = HOST_UNKNOWN;
 		break;
 	case IMSG_TABLE_DISABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((table = table_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		table->conf.flags |= F_DISABLE;
@@ -1898,7 +1911,8 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 			host->up = HOST_UNKNOWN;
 		break;
 	case IMSG_TABLE_ENABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((table = table_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		table->conf.flags &= ~(F_DISABLE);
@@ -1908,7 +1922,7 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		break;
 	case IMSG_HOST_STATUS:
 		if (imsg_get_data(imsg, &st, sizeof(st)) == -1)
-			return (-1);
+			fatalx("%s: imsg_get_data", __func__);
 		if ((host = host_find(env, st.id)) == NULL)
 			fatalx("%s: invalid host id", __func__);
 		if (host->flags & F_DISABLE)
@@ -1923,7 +1937,7 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		    NULL)
 			fatalx("%s: invalid table id", __func__);
 
-		DPRINTF("%s: [%d] state %d for "
+		log_debug("%s: [%d] state %d for "
 		    "host %u %s", __func__, p->p_ps->ps_instance, st.up,
 		    host->conf.id, host->conf.name);
 
@@ -1939,7 +1953,8 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		host->up = st.up;
 		break;
 	case IMSG_NATLOOK:
-		bcopy(imsg->data, &cnl, sizeof(cnl));
+		if (imsg_get_data(imsg, &cnl, sizeof(cnl)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((con = session_find(env, cnl.id)) == NULL ||
 		    con->se_cnl == NULL) {
 			log_debug("%s: session %d: expired",
@@ -1954,18 +1969,20 @@ relay_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		break;
 	case IMSG_CTL_SESSION:
 		if (imsg_get_data(imsg, &cid, sizeof(cid)) == -1)
-			return (-1);
+			fatalx("%s: imsg_get_data", __func__);
 		TAILQ_FOREACH(rlay, env->sc_relays, rl_entry) {
 			SPLAY_FOREACH(con, session_tree,
 			    &rlay->rl_sessions) {
 				memcpy(&se, con, sizeof(se));
 				se.se_cid = cid;
-				proc_compose(env->sc_ps, p->p_id,
-				    IMSG_CTL_SESSION, &se, sizeof(se));
+				if (proc_compose(env->sc_ps, p->p_id,
+				    IMSG_CTL_SESSION, &se, sizeof(se)) == -1)
+					log_warn("%s: proc_compose", __func__);
 			}
 		}
-		proc_compose(env->sc_ps, p->p_id, IMSG_CTL_END,
-		    &cid, sizeof(cid));
+		if (proc_compose(env->sc_ps, p->p_id, IMSG_CTL_END,
+		    &cid, sizeof(cid)) == -1)
+			log_warn("%s: proc_compose", __func__);
 		break;
 	default:
 		return (-1);
@@ -1978,6 +1995,9 @@ int
 relay_dispatch_ca(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	switch (imsg_get_type(imsg)) {
+	case IMSG_CA_ECDSA_SIGN:
+		log_warnx("%s: priv result after timeout", __func__);
+		return (0);
 	case IMSG_CA_PRIVENC:
 	case IMSG_CA_PRIVDEC:
 		log_warnx("%s: priv%s result after timeout", __func__,
@@ -1998,7 +2018,8 @@ relay_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 
 	switch (imsg_get_type(imsg)) {
 	case IMSG_BINDANY:
-		bcopy(imsg->data, &id, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((con = session_find(env, id)) == NULL) {
 			log_debug("%s: session %d: expired",
 			    __func__, id);
@@ -2014,39 +2035,48 @@ relay_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		evtimer_add(&con->se_ev, &tv);
 		break;
 	case IMSG_CFG_TABLE:
-		config_gettable(env, imsg);
+		if (config_gettable(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_HOST:
-		config_gethost(env, imsg);
+		if (config_gethost(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_PROTO:
-		config_getproto(env, imsg);
+		if (config_getproto(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RULE:
-		config_getrule(env, imsg);
+		if (config_getrule(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RELAY:
-		config_getrelay(env, imsg);
+		if (config_getrelay(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RELAY_TABLE:
-		config_getrelaytable(env, imsg);
+		if (config_getrelaytable(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RELAY_FD:
-		config_getrelayfd(env, imsg);
+		if (config_getrelayfd(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_DONE:
-		config_getcfg(env, imsg);
+		if (config_getcfg(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CTL_START:
 		relay_launch();
 		break;
 	case IMSG_CTL_RESET:
-		config_getreset(env, imsg);
+		if (config_getreset(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_TLSTICKET_REKEY:
 		if (imsg_get_data(imsg, &env->sc_ticket,
 		    sizeof(env->sc_ticket)) == -1)
-			return (-1);
+			fatalx("%s: imsg_get_data", __func__);
 		TAILQ_FOREACH(rlay, env->sc_relays, rl_entry) {
 			if (rlay->rl_conf.flags & F_TLS)
 				tls_config_add_ticket_key(rlay->rl_tls_cfg,
@@ -2427,11 +2457,7 @@ relay_tls_handshake(int fd, short event, void *arg)
 
 	ret = tls_handshake(cre->tls);
 	if (ret == 0) {
-#ifdef DEBUG
-		log_info(
-#else
 		log_debug(
-#endif
 		    "relay %s, tls session %d %s (%d active)",
 		    rlay->rl_conf.name, con->se_id,
 		    cre->dir == RELAY_DIR_REQUEST ? "established" : "connected",
@@ -2480,7 +2506,7 @@ relay_tls_handshake(int fd, short event, void *arg)
 		return;
 	}
 
-	DPRINTF("%s: session %d: scheduling on %s", __func__, con->se_id,
+	log_debug("%s: session %d: scheduling on %s", __func__, con->se_id,
 	    (retry_flag == EV_READ) ? "EV_READ" : "EV_WRITE");
 	event_again(&con->se_ev, fd, EV_TIMEOUT|retry_flag, relay_tls_handshake,
 	    &con->se_tv_start, &rlay->rl_conf.timeout, cre);

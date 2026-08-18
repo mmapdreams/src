@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_update.c,v 1.199 2026/06/24 18:56:53 claudio Exp $ */
+/*	$OpenBSD: rde_update.c,v 1.203 2026/07/21 21:02:29 claudio Exp $ */
 
 /*
  * Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
@@ -159,7 +159,7 @@ up_enforce_open_policy(struct rde_peer *peer, struct filterstate *state,
  */
 static enum up_state
 up_process_prefix(struct rde_peer *peer, struct prefix *new,
-    struct adjout_prefix *p, int force_update)
+    struct adjout_prefix *p, enum eval_mode mode)
 {
 	struct filterstate state;
 	struct bgpd_addr addr;
@@ -202,7 +202,7 @@ up_process_prefix(struct rde_peer *peer, struct prefix *new,
 
 	up_prep_adjout(peer, &state, new->pt->aid);
 	adjout_prefix_update(p, peer, &state, new->pt, new_path_id_tx,
-	    force_update);
+	    mode == EVAL_SYNC);
 	rde_filterstate_clean(&state);
 
 	/* max prefix checker outbound */
@@ -221,16 +221,28 @@ up_process_prefix(struct rde_peer *peer, struct prefix *new,
 
 void
 up_generate_updates(struct rde_peer *peer, struct rib_entry *re,
-    int force_update)
+    enum eval_mode mode)
 {
 	struct prefix		*new;
 	struct adjout_prefix	*p;
 
 	p = adjout_prefix_first(re->prefix, peer->adjout_bid);
 
+	/*
+	 * In case the peer switched from add-path send to no add-path,
+	 * flush all the cached prefixes during initial sync.
+	 */
+	if (mode == EVAL_SYNC && p != NULL && p->path_id_tx != 0) {
+		do {
+			adjout_prefix_withdraw(peer, re->prefix, p, 1);
+			p = adjout_prefix_next(re->prefix,
+			    peer->adjout_bid, p);
+		} while(p != NULL);
+	}
+
 	new = prefix_best(re);
 	while (new != NULL) {
-		switch (up_process_prefix(peer, new, p, force_update)) {
+		switch (up_process_prefix(peer, new, p, mode)) {
 		case UP_OK:
 		case UP_ERR_LIMIT:
 			return;
@@ -249,7 +261,7 @@ up_generate_updates(struct rde_peer *peer, struct rib_entry *re,
 done:
 	/* withdraw prefix */
 	if (p != NULL)
-		adjout_prefix_withdraw(peer, re->prefix, p);
+		adjout_prefix_withdraw(peer, re->prefix, p, mode == EVAL_SYNC);
 }
 
 /*
@@ -261,7 +273,7 @@ done:
  */
 void
 up_generate_addpath(struct rde_peer *peer, struct rib_entry *re,
-    int force_update)
+    enum eval_mode mode)
 {
 	struct prefix		*new;
 	struct adjout_prefix	*head, *p;
@@ -322,8 +334,7 @@ up_generate_addpath(struct rde_peer *peer, struct rib_entry *re,
 		if (extra != 0 && extrapaths >= peer->eval.extrapaths)
 			break;
 
-		switch (up_process_prefix(peer, new, (void *)-1,
-		    force_update)) {
+		switch (up_process_prefix(peer, new, (void *)-1, mode)) {
 		case UP_OK:
 			maxpaths++;
 			extrapaths += extra;
@@ -354,7 +365,8 @@ up_generate_addpath(struct rde_peer *peer, struct rib_entry *re,
 			p = adjout_prefix_get(peer, addpath_prefix_list[i],
 			    re->prefix);
 			if (p != NULL)
-				adjout_prefix_withdraw(peer, re->prefix, p);
+				adjout_prefix_withdraw(peer, re->prefix, p,
+				    mode == EVAL_SYNC);
 		}
 	}
 }
@@ -365,51 +377,46 @@ up_generate_addpath(struct rde_peer *peer, struct rib_entry *re,
  */
 void
 up_generate_addpath_all(struct rde_peer *peer, struct rib_entry *re,
-    int force_update)
+    enum eval_mode mode)
 {
-#if 0
-	/* XXX needs to be rewritten */
 	struct adjout_prefix	*p;
+	struct pt_entry		*pte;
+	struct pq_entry		*pq;
 
 	/*
-	 * If old and new are NULL then re-insert all prefixes from re,
-	 * use up_generate_addpath() for that.
+	 * If this is a sync or reeval of all prefixes from re,
+	 * then use up_generate_addpath().
 	 */
-	if (old_pathid_tx == 0 && new == NULL) {
-		up_generate_addpath(peer, re, force_update);
+	if (mode == EVAL_SYNC || mode == EVAL_REEVAL) {
+		up_generate_addpath(peer, re, mode);
 		return;
 	}
 
-	if (new != NULL && !prefix_eligible(new)) {
-		/* only allow valid prefixes */
-		new = NULL;
-	}
-
-	if (new != NULL) {
-		/* add new path */
-		switch (up_process_prefix(peer, new, (void *)-1,
-		    force_update)) {
-		case UP_OK:
-			/* don't remove old if an existing prefix was updated */
-			if (old_pathid_tx == new->path_id_tx)
-				old_pathid_tx = 0;
-			break;
-		case UP_FILTERED:
-		case UP_EXCLUDED:
-			break;
-		case UP_ERR_LIMIT:
-			/* just give up */
-			return;
+	pte = re->prefix;
+	TAILQ_FOREACH(pq, &re->pq_head, entry) {
+		if (pq->p != NULL && prefix_eligible(pq->p)) {
+			/* add new path */
+			switch (up_process_prefix(peer, pq->p, (void *)-1,
+			    mode)) {
+			case UP_OK:
+				/* update processed, go to next */
+				continue;
+			case UP_FILTERED:
+			case UP_EXCLUDED:
+				/* update needs to be withdrawn */
+				break;
+			case UP_ERR_LIMIT:
+				/* just give up */
+				return;
+			}
 		}
-	}
 
-	if (old_pathid_tx != 0) {
-		/* withdraw old path */
-		p = adjout_prefix_get(peer, old_pathid_tx, re->prefix);
+		/* prefix was withdrawn or got filtered, withdraw from adjout */
+		p = adjout_prefix_get(peer, pq->path_id_tx, pte);
 		if (p != NULL)
-			adjout_prefix_withdraw(peer, re->prefix, p);
+			adjout_prefix_withdraw(peer, re->prefix, p,
+			    mode == EVAL_SYNC);
 	}
-#endif
 }
 
 /* send a default route to the specified peer, always force the update out */
@@ -457,6 +464,7 @@ up_generate_default(struct rde_peer *peer, uint8_t aid)
 	p = adjout_prefix_first(pte, peer->adjout_bid);
 	adjout_prefix_update(p, peer, &state, pte, 0, 1);
 	rde_filterstate_clean(&state);
+	adjout_prefix_collect(pte);
 
 	/* max prefix checker outbound */
 	if (peer->conf.max_out_prefix &&

@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolver.c,v 1.175 2025/09/15 08:43:51 florian Exp $	*/
+/*	$OpenBSD: resolver.c,v 1.177 2026/08/04 12:44:47 claudio Exp $	*/
 
 
 /*
@@ -490,8 +490,7 @@ resolver_dispatch_frontend(int fd, short event, void *bula)
 	struct imsgbuf		*ibuf;
 	struct imsg		 imsg;
 	struct query_imsg	*query_imsg;
-	ssize_t			 n;
-	int			 shut = 0, verbose, i, new_available_afs;
+	int			 n, shut = 0, verbose, i, new_available_afs;
 	char			*ta;
 
 	ibuf = &iev->ibuf;
@@ -512,8 +511,8 @@ resolver_dispatch_frontend(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get error", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get error", __func__);
 		if (n == 0)	/* No more messages. */
 			break;
 
@@ -632,8 +631,7 @@ resolver_dispatch_main(int fd, short event, void *bula)
 	struct imsg		 imsg;
 	struct imsgev		*iev = bula;
 	struct imsgbuf		*ibuf;
-	ssize_t			 n;
-	int			 shut = 0, i, *restart;
+	int			 n, shut = 0, i, *restart;
 
 	ibuf = &iev->ibuf;
 
@@ -653,8 +651,8 @@ resolver_dispatch_main(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get error", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get error", __func__);
 		if (n == 0)	/* No more messages. */
 			break;
 

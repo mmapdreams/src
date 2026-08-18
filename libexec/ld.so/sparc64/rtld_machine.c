@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtld_machine.c,v 1.72 2026/05/06 08:07:05 kettenis Exp $ */
+/*	$OpenBSD: rtld_machine.c,v 1.75 2026/07/16 11:21:37 tb Exp $ */
 
 /*
  * Copyright (c) 1999 Dale Rahn
@@ -189,7 +189,7 @@ static const long reloc_target_bitmask[] = {
 	_BM(22), _BM(10), _BM(22),	/* _PC_HH22, _PC_HM10, _PC_LM22 */
 	_BM(16), _BM(19),		/* _WDISP16, _WDISP19 */
 	-1,				/* GLOB_JMP */
-	_BM(7), _BM(5), _BM(6)		/* _7, _5, _6 */
+	_BM(7), _BM(5), _BM(6),		/* _7, _5, _6 */
 	-1, -1,				/* DISP64, PLT64 */
 	_BM(22), _BM(13),		/* HIX22, LOX10 */
 	_BM(22), _BM(10), _BM(13),	/* H44, M44, L44 */
@@ -328,7 +328,7 @@ resolve_failed:
 
 			/* Write it back out. */
 			for (i=0; i<size; i++)
-				ptr[i] = ((tmp >> (8*i)) & 0xff);
+				ptr[i] = ((tmp >> (8*(size - i - 1))) & 0xff);
 		} else if (RELOC_TARGET_SIZE(type) > 32) {
 			*where &= ~mask;
 			*where |= value;
@@ -625,7 +625,7 @@ _dl_bind(elf_object_t *object, int index)
 	sr = _dl_find_symbol(symn, SYM_SEARCH_ALL|SYM_WARNNOTFOUND|SYM_PLT,
 	    sym, object);
 	if (sr.sym == NULL)
-		_dl_die("lazy binding failed!");
+		_dl_die("lazy binding failed for %s", symn);
 
 	newvalue = sr.obj->obj_base + sr.sym->st_value;
 

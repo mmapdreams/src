@@ -1,4 +1,4 @@
-/*	$OpenBSD: hce.c,v 1.85 2026/06/15 11:02:13 rsadowski Exp $	*/
+/*	$OpenBSD: hce.c,v 1.88 2026/08/12 18:38:17 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -136,7 +136,8 @@ hce_launch_checks(int fd, short event, void *arg)
 	/*
 	 * notify pfe checks are done and schedule next check
 	 */
-	proc_compose(env->sc_ps, PROC_PFE, IMSG_SYNC, NULL, 0);
+	if (proc_compose(env->sc_ps, PROC_PFE, IMSG_SYNC, NULL, 0) == -1)
+		log_warn("%s: proc_compose", __func__);
 	TAILQ_FOREACH(table, env->sc_tables, entry) {
 		TAILQ_FOREACH(host, &table->hosts, entry) {
 			if ((host->flags & F_CHECK_DONE) == 0)
@@ -246,7 +247,9 @@ hce_notify_done(struct host *host, enum host_error he)
 	if (msg)
 		log_debug("%s: %s (%s)", __func__, host->conf.name, msg);
 
-	proc_compose(env->sc_ps, PROC_PFE, IMSG_HOST_STATUS, &st, sizeof(st));
+	if (proc_compose(env->sc_ps, PROC_PFE, IMSG_HOST_STATUS, &st,
+	    sizeof(st)) == -1)
+		log_warn("%s: proc_compose", __func__);
 	if (host->up != host->last_up)
 		logopt = RELAYD_OPT_LOGUPDATE;
 
@@ -291,7 +294,8 @@ hce_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 
 	switch (imsg_get_type(imsg)) {
 	case IMSG_HOST_DISABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((host = host_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		host->flags |= F_DISABLE;
@@ -301,7 +305,8 @@ hce_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		host->he = HCE_NONE;
 		break;
 	case IMSG_HOST_ENABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((host = host_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		host->flags &= ~(F_DISABLE);
@@ -309,7 +314,8 @@ hce_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		host->he = HCE_NONE;
 		break;
 	case IMSG_TABLE_DISABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((table = table_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		table->conf.flags |= F_DISABLE;
@@ -317,7 +323,8 @@ hce_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 			host->up = HOST_UNKNOWN;
 		break;
 	case IMSG_TABLE_ENABLE:
-		memcpy(&id, imsg->data, sizeof(id));
+		if (imsg_get_data(imsg, &id, sizeof(id)) == -1)
+			fatalx("%s: imsg_get_data", __func__);
 		if ((table = table_find(env, id)) == NULL)
 			fatalx("%s: desynchronized", __func__);
 		table->conf.flags &= ~(F_DISABLE);
@@ -345,23 +352,27 @@ hce_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 	switch (imsg_get_type(imsg)) {
 	case IMSG_SCRIPT:
 		if (imsg_get_data(imsg, &scr, sizeof(scr)) == -1)
-			return (-1);
+			fatalx("%s: imsg_get_data", __func__);
 		script_done(env, &scr);
 		break;
 	case IMSG_CFG_TABLE:
-		config_gettable(env, imsg);
+		if (config_gettable(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_HOST:
-		config_gethost(env, imsg);
+		if (config_gethost(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_DONE:
-		config_getcfg(env, imsg);
+		if (config_getcfg(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CTL_START:
 		hce_setup_events();
 		break;
 	case IMSG_CTL_RESET:
-		config_getreset(env, imsg);
+		if (config_getreset(env, imsg) != 0)
+			return (-1);
 		break;
 	default:
 		return (-1);

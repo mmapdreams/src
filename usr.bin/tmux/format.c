@@ -1,4 +1,4 @@
-/* $OpenBSD: format.c,v 1.399 2026/07/03 18:28:57 nicm Exp $ */
+/* $OpenBSD: format.c,v 1.412 2026/08/05 07:31:08 nicm Exp $ */
 
 /*
  * Copyright (c) 2011 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -85,13 +85,13 @@ format_job_cmp(struct format_job *fj1, struct format_job *fj2)
 	return (strcmp(fj1->cmd, fj2->cmd));
 }
 
-/* Maimum pad and trim width. */
+/* Maximum pad and trim width. */
 #define FORMAT_MAX_WIDTH 10000
 
-/* Maimum repeat size. */
+/* Maximum repeat size. */
 #define FORMAT_MAX_REPEAT 10000
 
-/* Maimum precision. */
+/* Maximum precision. */
 #define FORMAT_MAX_PRECISION 100
 
 /* Format modifiers. */
@@ -127,6 +127,8 @@ format_job_cmp(struct format_job *fj1, struct format_job *fj2)
 #define FORMAT_QUOTE_SHELL_SQ 0x20000000
 #define FORMAT_OPTIONS 0x40000000
 #define FORMAT_ENVIRON 0x80000000ULL
+#define FORMAT_DIFFERENCE 0x100000000ULL
+#define FORMAT_CYCLE 0x200000000ULL
 
 /* Limit on recursion. */
 #define FORMAT_LOOP_LIMIT 100
@@ -137,9 +139,13 @@ format_job_cmp(struct format_job *fj1, struct format_job *fj2)
 /* How often to check the time in long loops. */
 #define FORMAT_TIME_LOOP_CHECK 10000
 
+/* Fixed animation period (ms): redraw interval and shortest frame step. */
+#define FORMAT_CYCLE_PERIOD 100
+
 /* Format expand flags. */
 #define FORMAT_EXPAND_TIME 0x1
 #define FORMAT_EXPAND_NOJOBS 0x2
+#define FORMAT_EXPAND_NOCYCLE 0x4
 
 /* Entry in format tree. */
 struct format_entry {
@@ -412,7 +418,8 @@ format_job_get(struct format_expand_state *es, const char *cmd)
 		RB_INSERT(format_job_tree, jobs, fj);
 	}
 
-	format_copy_state(&next, es, FORMAT_EXPAND_NOJOBS);
+	format_copy_state(&next, es, FORMAT_EXPAND_NOJOBS|
+	    FORMAT_EXPAND_NOCYCLE);
 	next.flags &= ~FORMAT_EXPAND_TIME;
 
 	expanded = format_expand1(&next, cmd);
@@ -1067,6 +1074,20 @@ format_cb_pane_floating_flag(struct format_tree *ft)
 
 	if (wp != NULL) {
 		if (window_pane_is_floating(wp))
+			return (xstrdup("1"));
+		return (xstrdup("0"));
+	}
+	return (NULL);
+}
+
+/* Callback for pane_modal_flag. */
+static void *
+format_cb_pane_modal_flag(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+
+	if (wp != NULL) {
+		if (wp == wp->window->modal)
 			return (xstrdup("1"));
 		return (xstrdup("0"));
 	}
@@ -2066,6 +2087,60 @@ format_cb_synchronized_output_flag(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for pane_private_modes. */
+static void *
+format_cb_pane_private_modes(struct format_tree *ft)
+{
+	static const struct {
+		int	mode;
+		int	number;
+	} table[] = {
+		{ MODE_KCURSOR,		1 },	/* DECCKM */
+		{ MODE_ORIGIN,		6 },	/* DECOM */
+		{ MODE_WRAP,		7 },	/* DECAWM */
+		{ MODE_CURSOR_BLINKING,	12 },	/* cursor blinking */
+		{ MODE_CURSOR,		25 },	/* DECTCEM */
+		{ MODE_MOUSE_STANDARD,	1000 },	/* mouse normal tracking */
+		{ MODE_MOUSE_BUTTON,	1002 },	/* mouse button tracking */
+		{ MODE_MOUSE_ALL,	1003 },	/* mouse any tracking */
+		{ MODE_FOCUSON,		1004 },	/* focus reporting */
+		{ MODE_MOUSE_UTF8,	1005 },	/* mouse: UTF-8 */
+		{ MODE_MOUSE_SGR,	1006 },	/* mouse: SGR */
+		{ MODE_BRACKETPASTE,	2004 },	/* bracketed paste */
+		{ MODE_SYNC,		2026 },	/* synchronized output */
+		{ MODE_THEME_UPDATES,	2031 },	/* theme update notifications */
+	};
+	int	 mode;
+	char	*value = NULL, *tmp;
+	u_int	 i;
+
+	if (ft->wp == NULL)
+		return (NULL);
+	mode = ft->wp->base.mode;
+
+	for (i = 0; i < nitems(table); i++) {
+		if (~mode & table[i].mode)
+			continue;
+		/*
+		 * Only report cursor blinking when set by the application, not
+		 * when it comes from the cursor-style option.
+		 */
+		if (table[i].mode == MODE_CURSOR_BLINKING &&
+		    (~mode & MODE_CURSOR_BLINKING_SET))
+			continue;
+		if (value == NULL)
+			xasprintf(&value, "%d", table[i].number);
+		else {
+			xasprintf(&tmp, "%s,%d", value, table[i].number);
+			free(value);
+			value = tmp;
+		}
+	}
+	if (value == NULL)
+		return (xstrdup(""));
+	return (value);
+}
+
 /* Callback for pane_active. */
 static void *
 format_cb_pane_active(struct format_tree *ft)
@@ -2169,6 +2244,106 @@ format_cb_pane_dead_time(struct format_tree *ft)
 			return (&wp->dead_time);
 		return (NULL);
 	}
+	return (NULL);
+}
+
+/* Callback for pane_last_output_time. */
+static void *
+format_cb_pane_last_output_time(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	static struct timeval	 tv;
+
+	if (wp != NULL && wp->last_output_time != 0) {
+		tv.tv_sec = wp->last_output_time;
+		tv.tv_usec = 0;
+		return (&tv);
+	}
+	return (NULL);
+}
+
+/* Callback for pane_last_prompt_time. */
+static void *
+format_cb_pane_last_prompt_time(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	static struct timeval	 tv;
+
+	if (wp != NULL && wp->last_prompt_time != 0) {
+		tv.tv_sec = wp->last_prompt_time;
+		tv.tv_usec = 0;
+		return (&tv);
+	}
+	return (NULL);
+}
+
+/* Callback for pane_command_start_time. */
+static void *
+format_cb_pane_command_start_time(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	static struct timeval	 tv;
+
+	if (wp != NULL && wp->cmd_start_time != 0) {
+		tv.tv_sec = wp->cmd_start_time;
+		tv.tv_usec = 0;
+		return (&tv);
+	}
+	return (NULL);
+}
+
+/* Callback for pane_command_end_time. */
+static void *
+format_cb_pane_command_end_time(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	static struct timeval	 tv;
+
+	if (wp != NULL && wp->cmd_end_time != 0) {
+		tv.tv_sec = wp->cmd_end_time;
+		tv.tv_usec = 0;
+		return (&tv);
+	}
+	return (NULL);
+}
+
+/* Callback for pane_command_running. */
+static void *
+format_cb_pane_command_running(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+
+	if (wp != NULL)
+		return (format_printf("%d", !!(wp->flags & PANE_CMDRUNNING)));
+	return (NULL);
+}
+
+/* Callback for pane_command_duration. */
+static void *
+format_cb_pane_command_duration(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	time_t			 end;
+
+	if (wp == NULL || wp->cmd_start_time == 0)
+		return (NULL);
+	if (wp->flags & PANE_CMDRUNNING)
+		end = time(NULL);
+	else
+		end = wp->cmd_end_time;
+	if (end < wp->cmd_start_time)
+		end = wp->cmd_start_time;
+	return (format_printf("%lld", (long long)(end - wp->cmd_start_time)));
+}
+
+/* Callback for pane_command_status. */
+static void *
+format_cb_pane_command_status(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+
+	if (wp != NULL && wp->cmd_status != -1)
+		return (format_printf("%d", wp->cmd_status));
 	return (NULL);
 }
 
@@ -2447,6 +2622,82 @@ format_cb_pane_tty(struct format_tree *ft)
 	if (ft->wp != NULL)
 		return (xstrdup(ft->wp->tty));
 	return (NULL);
+}
+
+/* Callback for pane_unzoomed_height. */
+static void *
+format_cb_pane_unzoomed_height(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	struct window		*w;
+	struct layout_cell	*lc, *root;
+	int			 status, floating;
+	u_int			 sy;
+
+	if (wp == NULL)
+		return (NULL);
+	w = wp->window;
+
+	lc = wp->saved_layout_cell;
+	if (lc == NULL)
+		lc = wp->layout_cell;
+	if (lc == NULL)
+		return (NULL);
+	sy = lc->g.sy;
+	floating = (lc->flags & LAYOUT_CELL_FLOATING);
+
+	root = w->saved_layout_root;
+	if (root == NULL)
+		root = w->layout_root;
+	if (lc == wp->saved_layout_cell && !floating)
+		status = window_get_pane_status(w);
+	else
+		status = window_pane_get_pane_status(wp);
+	if (!floating &&
+	    root != NULL &&
+	    layout_add_horizontal_border(root, lc, status) &&
+	    sy > 1)
+		sy--;
+
+	return (format_printf("%u", sy));
+}
+
+/* Callback for pane_unzoomed_width. */
+static void *
+format_cb_pane_unzoomed_width(struct format_tree *ft)
+{
+	struct window_pane	*wp = ft->wp;
+	struct layout_cell	*lc;
+	int			 saved, sb_w, sb_pad;
+	u_int			 sx;
+
+	if (wp == NULL)
+		return (NULL);
+
+	lc = wp->saved_layout_cell;
+	saved = (lc != NULL);
+	if (lc == NULL)
+		lc = wp->layout_cell;
+	if (lc == NULL)
+		return (NULL);
+	sx = lc->g.sx;
+
+	if ((saved && !SCREEN_IS_ALTERNATE(&wp->base) &&
+	    wp->window->sb == PANE_SCROLLBARS_ALWAYS) ||
+	    (!saved && window_pane_scrollbar_reserve(wp))) {
+		sb_w = wp->scrollbar_style.width;
+		sb_pad = wp->scrollbar_style.pad;
+		if (sb_w < 1)
+			sb_w = 1;
+		if (sb_pad < 0)
+			sb_pad = 0;
+		if ((int)sx - sb_w - sb_pad < PANE_MINIMUM)
+			sx = PANE_MINIMUM;
+		else
+			sx -= sb_w + sb_pad;
+	}
+
+	return (format_printf("%u", sx));
 }
 
 /* Callback for pane_width. */
@@ -2983,6 +3234,15 @@ format_cb_window_marked_flag(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for window_modal_pane. */
+static void *
+format_cb_window_modal_pane(struct format_tree *ft)
+{
+	if (ft->w != NULL && ft->w->modal != NULL)
+		return (format_printf("%%%u", ft->w->modal->id));
+	return (NULL);
+}
+
 /* Callback for window_name. */
 static void *
 format_cb_window_name(struct format_tree *ft)
@@ -3484,6 +3744,21 @@ static const struct format_table_entry format_table[] = {
 	{ "pane_bottom", FORMAT_TABLE_STRING,
 	  format_cb_pane_bottom
 	},
+	{ "pane_command_duration", FORMAT_TABLE_STRING,
+	  format_cb_pane_command_duration
+	},
+	{ "pane_command_end_time", FORMAT_TABLE_TIME,
+	  format_cb_pane_command_end_time
+	},
+	{ "pane_command_running", FORMAT_TABLE_STRING,
+	  format_cb_pane_command_running
+	},
+	{ "pane_command_start_time", FORMAT_TABLE_TIME,
+	  format_cb_pane_command_start_time
+	},
+	{ "pane_command_status", FORMAT_TABLE_STRING,
+	  format_cb_pane_command_status
+	},
 	{ "pane_current_command", FORMAT_TABLE_STRING,
 	  format_cb_current_command
 	},
@@ -3535,6 +3810,12 @@ static const struct format_table_entry format_table[] = {
 	{ "pane_last", FORMAT_TABLE_STRING,
 	  format_cb_pane_last
 	},
+	{ "pane_last_output_time", FORMAT_TABLE_TIME,
+	  format_cb_pane_last_output_time
+	},
+	{ "pane_last_prompt_time", FORMAT_TABLE_TIME,
+	  format_cb_pane_last_prompt_time
+	},
 	{ "pane_left", FORMAT_TABLE_STRING,
 	  format_cb_pane_left
 	},
@@ -3543,6 +3824,9 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "pane_marked_set", FORMAT_TABLE_STRING,
 	  format_cb_pane_marked_set
+	},
+	{ "pane_modal_flag", FORMAT_TABLE_STRING,
+	  format_cb_pane_modal_flag
 	},
 	{ "pane_mode", FORMAT_TABLE_STRING,
 	  format_cb_pane_mode
@@ -3564,6 +3848,9 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "pane_pipe_pid", FORMAT_TABLE_STRING,
 	  format_cb_pane_pipe_pid
+	},
+	{ "pane_private_modes", FORMAT_TABLE_STRING,
+	  format_cb_pane_private_modes
 	},
 	{ "pane_right", FORMAT_TABLE_STRING,
 	  format_cb_pane_right
@@ -3597,6 +3884,12 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "pane_unseen_changes", FORMAT_TABLE_STRING,
 	  format_cb_pane_unseen_changes
+	},
+	{ "pane_unzoomed_height", FORMAT_TABLE_STRING,
+	  format_cb_pane_unzoomed_height
+	},
+	{ "pane_unzoomed_width", FORMAT_TABLE_STRING,
+	  format_cb_pane_unzoomed_width
 	},
 	{ "pane_width", FORMAT_TABLE_STRING,
 	  format_cb_pane_width
@@ -3802,6 +4095,9 @@ static const struct format_table_entry format_table[] = {
 	{ "window_marked_flag", FORMAT_TABLE_STRING,
 	  format_cb_window_marked_flag
 	},
+	{ "window_modal_pane", FORMAT_TABLE_STRING,
+	  format_cb_window_modal_pane
+	},
 	{ "window_name", FORMAT_TABLE_STRING,
 	  format_cb_window_name
 	},
@@ -3943,6 +4239,8 @@ format_log_debug_cb(const char *key, const char *value, void *arg)
 void
 format_log_debug(struct format_tree *ft, const char *prefix)
 {
+	if (log_get_level() == 0)
+		return;
 	format_each(ft, format_log_debug_cb, (void *)prefix);
 }
 
@@ -4071,7 +4369,7 @@ format_quote_shell(const char *s)
 
 	at = out = xmalloc(strlen(s) * 2 + 1);
 	for (cp = s; *cp != '\0'; cp++) {
-		if (strchr("|&;<>()$`\\\"'*?[# =%", *cp) != NULL)
+		if (strchr("|&;<>()$`\\\"'*?[# =%\n\t", *cp) != NULL)
 			*at++ = '\\';
 		*at++ = *cp;
 	}
@@ -4203,6 +4501,17 @@ format_relative_time(time_t t)
 	return (xstrdup(out));
 }
 
+/* Make a time difference in seconds. */
+static char *
+format_time_difference(time_t t)
+{
+	time_t	 now = time(NULL);
+	char	*out;
+
+	xasprintf(&out, "%ld", (long)now - (long)t);
+	return (out);
+}
+
 /* Find a format entry. */
 static char *
 format_find(struct format_tree *ft, const char *key, uint64_t modifiers,
@@ -4213,25 +4522,26 @@ format_find(struct format_tree *ft, const char *key, uint64_t modifiers,
 	struct format_entry		*fe, fe_find;
 	struct environ_entry		*envent;
 	struct options_entry		*o;
-	int				 idx;
 	char				*found = NULL, *saved, s[512];
+	char				*array_key = NULL;
 	const char			*errstr;
 	time_t				 t = 0;
 	struct tm			 tm;
 
-	o = options_parse_get(global_options, key, &idx, 0);
+	o = options_parse_get(global_options, key, &array_key, 0);
 	if (o == NULL && ft->wp != NULL)
-		o = options_parse_get(ft->wp->options, key, &idx, 0);
+		o = options_parse_get(ft->wp->options, key, &array_key, 0);
 	if (o == NULL && ft->w != NULL)
-		o = options_parse_get(ft->w->options, key, &idx, 0);
+		o = options_parse_get(ft->w->options, key, &array_key, 0);
 	if (o == NULL)
-		o = options_parse_get(global_w_options, key, &idx, 0);
+		o = options_parse_get(global_w_options, key, &array_key, 0);
 	if (o == NULL && ft->s != NULL)
-		o = options_parse_get(ft->s->options, key, &idx, 0);
+		o = options_parse_get(ft->s->options, key, &array_key, 0);
 	if (o == NULL)
-		o = options_parse_get(global_s_options, key, &idx, 0);
+		o = options_parse_get(global_s_options, key, &array_key, 0);
 	if (o != NULL) {
-		found = options_to_string(o, idx, 1);
+		found = options_to_string(o, array_key, 1);
+		free(array_key);
 		goto found;
 	}
 
@@ -4286,6 +4596,8 @@ found:
 			return (NULL);
 		if (modifiers & FORMAT_RELATIVE)
 			found = format_relative_time(t);
+		else if (modifiers & FORMAT_DIFFERENCE)
+			found = format_time_difference(t);
 		else if (modifiers & FORMAT_PRETTY)
 			found = format_pretty_time(t, 0);
 		else {
@@ -4535,7 +4847,7 @@ format_build_modifiers(struct format_expand_state *es, const char **s,
 
 	/*
 	 * Modifiers are a ; separated list of the forms:
-	 *	l,m,C,a,b,c,d,I,n,t,w,q,E,T,S,W,P,O,V,R,<,>
+	 *	l,m,C,a,b,c,d,I,n,t,w,q,E,T,S,W,P,O,V,R,A,<,>
 	 *	=a
 	 *	=/a
 	 *	=/a/
@@ -4554,7 +4866,7 @@ format_build_modifiers(struct format_expand_state *es, const char **s,
 			break;
 
 		/* Check single character modifiers with no arguments. */
-		if (strchr("labdnwETSWPOVL!<>", cp[0]) != NULL &&
+		if (strchr("labdnwETSWPOVL!<>A", cp[0]) != NULL &&
 		    format_is_end(cp[1])) {
 			format_add_modifier(&list, count, cp, 1, NULL, 0);
 			cp++;
@@ -4576,7 +4888,7 @@ format_build_modifiers(struct format_expand_state *es, const char **s,
 		}
 
 		/* Now try single character with arguments. */
-		if (strchr("ImCLNPSOVst=pReqWc", cp[0]) == NULL)
+		if (strchr("ImCLNPSOVst=pReqWcA", cp[0]) == NULL)
 			break;
 		c = cp[0];
 
@@ -4925,7 +5237,7 @@ format_add_window_neighbour(struct format_tree *nft, struct winlink *wl,
 		oname = options_name(o);
 		if (*oname == '@') {
 			xasprintf(&prefixed, "%s_%s", prefix, oname);
-			oval = options_to_string(o, -1, 1);
+			oval = options_to_string(o, NULL, 1);
 			format_add(nft, prefixed, "%s", oval);
 			free(oval);
 			free(prefixed);
@@ -5097,11 +5409,12 @@ format_loop_add_option(struct format_expand_state *es, const char *fmt,
 	nft = format_create(ft->client, ft->item, FORMAT_NONE, ft->flags);
 
 	format_add(nft, "option_name", "%s", name);
-	s = options_to_string(o, -1, 0);
+	s = options_to_string(o, NULL, 0);
 	format_add(nft, "option_value", "%s", s);
 	free(s);
 
 	format_add(nft, "option_is_array", "%d", is_array);
+	format_add(nft, "option_array_key", "%s", "");
 	format_add(nft, "option_array_index", "%s", "");
 	format_add(nft, "option_array_first", "%d", is_array);
 	format_add(nft, "option_array_last", "%d", is_array);
@@ -5139,20 +5452,21 @@ format_loop_add_array_item(struct format_expand_state *es, const char *fmt,
 	struct format_expand_state		 next;
 	const struct options_table_entry	*oe = options_table_entry(o);
 	const char				*name = options_name(o);
+	const char				*array_key;
 	char					*expanded, *s;
-	u_int					 idx;
 
-	idx = options_array_item_index(a);
-	format_log(es, "option loop: %s[%u]", name, idx);
+	array_key = options_array_item_key(a);
+	format_log(es, "option loop: %s[%s]", name, array_key);
 	nft = format_create(ft->client, ft->item, FORMAT_NONE, ft->flags);
 
 	format_add(nft, "option_name", "%s", name);
-	s = options_to_string(o, idx, 0);
+	s = options_to_string(o, array_key, 0);
 	format_add(nft, "option_value", "%s", s);
 	free(s);
 
 	format_add(nft, "option_is_array", "1");
-	format_add(nft, "option_array_index", "%u", idx);
+	format_add(nft, "option_array_key", "%s", array_key);
+	format_add(nft, "option_array_index", "%s", array_key);
 	if (a == options_array_first(o))
 		format_add(nft, "option_array_first", "1");
 	else
@@ -5533,6 +5847,74 @@ fail:
 	return (NULL);
 }
 
+/* Callback for the cycle timer; redraw the status line. */
+static void
+format_cycle_callback(__unused int fd, __unused short events, void *arg)
+{
+	struct client	*c = arg;
+
+	if (c->message_string == NULL && c->prompt == NULL)
+		c->flags |= CLIENT_REDRAWSTATUS;
+}
+
+/* Arm the cycle timer to redraw the status line if it is not already. */
+static void
+format_cycle_start_timer(struct client *c)
+{
+	struct timeval	tv;
+
+	tv.tv_sec = FORMAT_CYCLE_PERIOD / 1000;
+	tv.tv_usec = (FORMAT_CYCLE_PERIOD % 1000) * 1000L;
+
+	if (!event_initialized(&c->cycle_timer))
+		evtimer_set(&c->cycle_timer, format_cycle_callback, c);
+	if (!evtimer_pending(&c->cycle_timer, NULL))
+		evtimer_add(&c->cycle_timer, &tv);
+}
+
+/* Expand the "A" animation modifier; see the manual for the syntax. */
+static char *
+format_cycle(struct format_expand_state *es, const char *frames, u_int count)
+{
+	struct format_tree	*ft = es->ft;
+	const char		*start, *end, *cp;
+	u_int			 n, index, i;
+
+	/*
+	 * A cycle is only expanded in a status format, and never in the
+	 * command or output of #() where it would change on every frame and
+	 * make the job run again.
+	 */
+	if (!(ft->flags & FORMAT_STATUS) || (es->flags & FORMAT_EXPAND_NOCYCLE))
+		return (xstrdup(""));
+	if (*frames == '\0')
+		return (xstrdup(""));
+
+	/* Count the comma-separated frames (there is at least one). */
+	n = 1;
+	for (cp = frames; *cp != '\0'; cp++) {
+		if (*cp == ',')
+			n++;
+	}
+	index = (es->start_time / (count * FORMAT_CYCLE_PERIOD)) % n;
+
+	/*
+	 * Redraw the status line so the frames advance on their own; a
+	 * single frame never changes so there is nothing to redraw for.
+	 */
+	if (n > 1 && ft->client != NULL)
+		format_cycle_start_timer(ft->client);
+
+	/* Walk to the chosen frame and return a copy of it. */
+	start = frames;
+	for (i = 0; i < index; i++)
+		start = strchr(start, ',') + 1;
+	end = strchr(start, ',');
+	if (end == NULL)
+		end = start + strlen(start);
+	return (xstrndup(start, end - start));
+}
+
 /* Replace a key. */
 static int
 format_replace(struct format_expand_state *es, const char *key, size_t keylen,
@@ -5553,6 +5935,7 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 	struct format_modifier		 *list, *cmp = NULL, *search = NULL;
 	struct format_modifier		**sub = NULL, *mexp = NULL, *fm;
 	struct format_modifier		 *bool_op_n = NULL;
+	u_int				  cycle_count = 1;
 	u_int				  i, count, nsub = 0, nrep, check = 0;
 	const char			 *loop_flags = "";
 	struct format_expand_state	  next;
@@ -5613,6 +5996,15 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 				if (errstr != NULL)
 					width = 0;
 				break;
+			case 'A':
+				modifiers |= FORMAT_CYCLE;
+				if (fm->argc < 1)
+					break;
+				cycle_count = strtonum(fm->argv[0], 1, 100,
+				    &errstr);
+				if (errstr != NULL)
+					cycle_count = 1;
+				break;
 			case 'w':
 				modifiers |= FORMAT_WIDTH;
 				break;
@@ -5663,6 +6055,8 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 					modifiers |= FORMAT_PRETTY;
 				else if (strchr(fm->argv[0], 'r') != NULL)
 					modifiers |= FORMAT_RELATIVE;
+				else if (strchr(fm->argv[0], 'd') != NULL)
+					modifiers |= FORMAT_DIFFERENCE;
 				else if (fm->argc >= 2 &&
 				    strchr(fm->argv[0], 'f') != NULL) {
 					free(time_format);
@@ -5829,6 +6223,13 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 			else
 				value = xstrdup("");
 		}
+		goto done;
+	}
+
+	/* Is this an animation cycle? */
+	if (modifiers & FORMAT_CYCLE) {
+		value = format_cycle(es, copy, cycle_count);
+		format_log(es, "cycle '%s' is: %s", copy, value);
 		goto done;
 	}
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: relayd.h,v 1.289 2026/07/01 18:11:44 martijn Exp $	*/
+/*	$OpenBSD: relayd.h,v 1.294 2026/08/12 19:29:34 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -373,7 +373,7 @@ union hashkey {
 };
 
 #define F_DISABLE		0x00000001
-#define F_BACKUP		0x00000002
+#define F_BACKUP		0x00000002 /* unused */
 #define F_USED			0x00000004
 #define F_DOWN			0x00000008
 #define F_ADD			0x00000010
@@ -1001,6 +1001,7 @@ enum imsg_type {
 	IMSG_CFG_DONE,
 	IMSG_CA_PRIVENC,
 	IMSG_CA_PRIVDEC,
+	IMSG_CA_ECDSA_SIGN,
 	IMSG_SESS_PUBLISH,	/* from relay to pfe */
 	IMSG_SESS_UNPUBLISH,
 	IMSG_TLSTICKET_REKEY
@@ -1147,6 +1148,7 @@ int		 control_listen(struct control_sock *);
 void		 control_cleanup(struct control_sock *);
 void		 control_dispatch_imsg(int, short, void *);
 void		 control_imsg_forward(struct imsg *);
+void		 control_imsg_notify(uint32_t, void *, uint16_t);
 struct ctl_conn	*control_connbyfd(int);
 
 /* parse.y */
@@ -1158,9 +1160,7 @@ int	 cmdline_symset(char *);
 const char *host_error(enum host_error);
 const char *host_status(enum host_status);
 const char *table_check(enum table_check);
-#ifdef DEBUG
 const char *relay_state(enum relay_state);
-#endif
 const char	*print_availability(u_long, u_long);
 const char	*print_host(struct sockaddr_storage *, char *, size_t);
 const char	*print_time(struct timeval *, struct timeval *, char *, size_t);
@@ -1331,9 +1331,6 @@ int			 map6to4(struct sockaddr_storage *);
 int			 map4to6(struct sockaddr_storage *,
     struct sockaddr_storage *);
 void			 imsg_event_add(struct imsgev *);
-int			 imsg_compose_event(struct imsgev *, u_int16_t,
-    u_int32_t,
-    pid_t, int, void *, u_int16_t);
 void			 socket_rlimit(int);
 void			*get_data(struct ibuf *, size_t);
 int			 sockaddr_cmp(struct sockaddr *, struct sockaddr *,
@@ -1341,8 +1338,7 @@ int			 sockaddr_cmp(struct sockaddr *, struct sockaddr *,
 struct in6_addr		*prefixlen2mask6(u_int8_t, u_int32_t *);
 u_int32_t		 prefixlen2mask(u_int8_t);
 int			 accept_reserve(int, struct sockaddr *, socklen_t *,
-    int,
-    volatile int *);
+    int, volatile int *);
 struct kv		*kv_add(struct kvtree *, char *, char *, int);
 int			 kv_set(struct kv *, char *, ...)
 	__attribute__((__format__(printf, 2, 3)));
@@ -1429,8 +1425,7 @@ void			 imsg_event_add(struct imsgev *);
 int			 imsg_compose_event(struct imsgev *, uint16_t, uint32_t,
     pid_t, int, void *, uint16_t);
 int			 imsg_composev_event(struct imsgev *, uint16_t,
-    uint32_t,
-    pid_t, int, const struct iovec *, int);
+    uint32_t, pid_t, int, const struct iovec *, int);
 
 /* config.c */
 int	 config_init(struct relayd *);

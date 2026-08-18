@@ -1,4 +1,4 @@
-/*	$OpenBSD: midi.c,v 1.40 2026/06/22 14:21:14 ratchov Exp $	*/
+/*	$OpenBSD: midi.c,v 1.46 2026/08/17 00:26:21 jsg Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -44,7 +44,7 @@ struct midiops port_midiops = {
 struct midi midi_ep[MIDI_NEP];
 struct port *port_list = NULL;
 unsigned int midi_portnum = 0;
-struct midithru midithru_array[MIDITHRU_NMAX];
+struct midithru *midithru_list;
 
 /*
  * length of voice and common messages (status byte included)
@@ -118,6 +118,7 @@ midi_del(struct midi *ep)
 {
 	int i;
 	struct midi *peer;
+	struct midithru *t;
 
 	ep->txmask = 0;
 	for (i = 0; i < MIDI_NEP; i++) {
@@ -127,9 +128,9 @@ midi_del(struct midi *ep)
 			midi_tickets(peer);
 		}
 	}
-	for (i = 0; i < MIDITHRU_NMAX; i++) {
-		midithru_array[i].progmask &= ~ep->self;
-		midithru_array[i].portmask &= ~ep->self;
+	for (t = midithru_list; t != NULL; t = t->next) {
+		t->progmask &= ~ep->self;
+		t->portmask &= ~ep->self;
 	}
 	ep->ops = NULL;
 	if (ep->mode & MODE_MIDIIN) {
@@ -421,6 +422,7 @@ struct port *
 port_new(char *path, unsigned int mode, int hold)
 {
 	struct port *c;
+	char name[CTL_NAMEMAX];
 
 	c = xmalloc(sizeof(struct port));
 	c->path = path;
@@ -429,6 +431,10 @@ port_new(char *path, unsigned int mode, int hold)
 	c->refcnt = 0;
 	c->midi = midi_new(&port_midiops, c, mode);
 	c->num = midi_portnum++;
+	snprintf(name, sizeof(name), "%d", c->num);
+	c->midithru = midithru_new(name);
+	c->midithru->prefportmask |= c->midi->self;
+	c->midithru->fixed = 1;
 	c->next = port_list;
 	port_list = c;
 	return c;
@@ -445,6 +451,7 @@ port_del(struct port *c)
 	if (c->state != PORT_CFG)
 		port_close(c);
 	midi_del(c->midi);
+	midithru_del(c->midithru);
 	for (p = &port_list; *p != c; p = &(*p)->next) {
 #ifdef DEBUG
 		if (*p == NULL) {
@@ -555,12 +562,28 @@ void
 port_abort(struct port *p)
 {
 	struct ctl *c;
+	struct midithru *t;
+	struct ctlslot *s;
 	int i;
 
-	for (i = 0; i < MIDITHRU_NMAX; i++) {
-		midithru_rm(midithru_array + i, p->midi);
+	for (t = midithru_list; t != NULL; t = t->next) {
 
-		c = ctl_find(CTL_MIDI_PORT, midithru_array + i, p);
+		if (t->fixed) {
+			for (s = ctlslot_array, i = 0; i < DEV_NCTLSLOT; i++, s++) {
+				if (s->ops != NULL && s->midithru == t) {
+					s->ops->exit(s->arg);
+					s->ops = NULL;
+				}
+			}
+		} else {
+			/*
+			 * For non-fixed midithru structures unlink the port,
+			 * allowing the client to continue operation (otherwise
+			 * midi_abort() will disconnect clients using the port).
+			 */
+			midithru_rm(t, p->midi);
+		}
+		c = ctl_find(CTL_MIDI_PORT, t, p);
 		if (c != NULL && c->curval != 0) {
 			c->val_mask = ~0U;
 			c->curval = 0;
@@ -569,31 +592,89 @@ port_abort(struct port *p)
 	midi_abort(p->midi);
 }
 
+struct midithru *
+midithru_new(const char *name)
+{
+	struct midithru *t;
+
+	t = xmalloc(sizeof(struct midithru));
+	memset(t, 0, sizeof(struct midithru));
+	strlcpy(t->name, name, sizeof(t->name));
+	t->thru = 1;
+	if (name[0]) {
+		t->next = midithru_list;
+		midithru_list = t;
+	}
+	return t;
+}
+
 void
+midithru_del(struct midithru *t)
+{
+	struct midithru **pt;
+
+	if (t->name[0]) {
+		for (pt = &midithru_list; *pt != t; pt = &(*pt)->next) {
+#ifdef DEBUG
+			if (*pt == NULL) {
+				logx(0, "%s: not on list", __func__);
+				panic();
+			}
+#endif
+		}
+		*pt = t->next;
+	}
+	xfree(t);
+}
+
+struct midithru *
+midithru_byname(const char *name)
+{
+	struct midithru *t;
+
+	for (t = midithru_list; t != NULL; t = t->next) {
+		if (strcmp(t->name, name) == 0)
+			return t;
+	}
+	return NULL;
+}
+
+int
 midithru_ref(struct midithru *t)
 {
 	struct port *c;
 	char name[64];
 
 #ifdef DEBUG
-	logx(3, "%zu: midithru requested", t - midithru_array);
+	logx(3, "%s: midithru requested", t->name);
 #endif
 	if (t->refcnt++ > 0)
-		return;
+		return 1;
+
 	for (c = port_list; c != NULL; c = c->next) {
-		c->refcnt++;
-		if (c->state == DEV_CFG)
-			port_open(c);
-		if (c->state == DEV_INIT && (t->prefportmask & c->midi->self))
-			midithru_addport(t, c);
+		if (t->fixed && !(t->prefportmask & c->midi->self))
+			continue;
+		if (port_ref(c)) {
+			if (t->prefportmask & c->midi->self)
+				midithru_addport(t, c);
+		} else {
+			if (t->fixed) {
+				midithru_unref(t);
+				return 0;
+			}
+			c->refcnt++;
+		}
 		snprintf(name, sizeof(name), "%u", c->num);
 		ctl_new(CTL_MIDI_PORT, t, c,
 		    CTL_LIST, "", "", "server", -1, "port",
 		    name, -1, 1, !!(t->portmask & c->midi->self));
 	}
-	ctl_new(CTL_MIDI_THRU, t, c,
-	    CTL_SW, "", "", "server", -1, "thru",
-	    "", -1, 1, t->thru);
+	if (!t->fixed) {
+		ctl_new(CTL_MIDI_THRU, t, NULL,
+		    CTL_SW, "", "", "server", -1, "thru",
+		    "", -1, 1, t->thru);
+	}
+	return 1;
 }
 
 void
@@ -602,10 +683,11 @@ midithru_unref(struct midithru *t)
 	struct port *c;
 
 #ifdef DEBUG
-	logx(3, "%zu: midithru released", t - midithru_array);
+	logx(3, "%s: midithru released", t->name);
 #endif
 	if (--t->refcnt > 0)
 		return;
+
 	/* delete server.port control */
 	for (c = port_list; c != NULL; c = c->next) {
 		if (ctl_del(CTL_MIDI_PORT, t, c)) {
@@ -705,19 +787,19 @@ void
 midithru_scanports(void)
 {
 	struct port *p;
+	struct midithru *t;
 	struct ctl *c;
-	int i;
 
 	for (p = port_list; p != NULL; p = p->next) {
 
 		if (p->refcnt == 0 || p->state != PORT_CFG || !port_open(p))
 			continue;
 
-		for (i = 0; i < MIDITHRU_NMAX; i++) {
-			if (!(midithru_array[i].prefportmask & p->midi->self))
+		for (t = midithru_list; t != NULL; t = t->next) {
+			if (!(t->prefportmask & p->midi->self))
 				continue;
-			midithru_addport(midithru_array + i, p);
-			c = ctl_find(CTL_MIDI_PORT, midithru_array + i, p);
+			midithru_addport(t, p);
+			c = ctl_find(CTL_MIDI_PORT, t, p);
 			if (c != NULL && c->curval != 0) {
 				c->val_mask = ~0U;
 				c->curval = 1;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.c,v 1.140 2026/05/31 20:28:51 bluhm Exp $	*/
+/*	$OpenBSD: virtio.c,v 1.147 2026/08/04 19:12:14 claudio Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -58,6 +58,16 @@ extern struct vmd *env;
 struct virtio_dev viornd;
 struct virtio_dev *vioscsi = NULL;
 struct virtio_dev vmmci;
+
+/*
+ * Serializes synchronous PCI IO with a mutex. This will need to be
+ * revisited when vmd supports SMP to allow more than one VCPU to
+ * process synchronous PCI IO messages.
+ */
+pthread_mutex_t vcpu_sync_mtx;
+
+/* Guards the in-process entropy device state. */
+static pthread_mutex_t viornd_mtx;
 
 /* Devices emulated in subprocesses are inserted into this list. */
 SLIST_HEAD(virtio_dev_head, virtio_dev) virtio_devs;
@@ -358,8 +368,10 @@ virtio_io_dispatch(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
     void *arg, uint8_t sz)
 {
 	struct virtio_dev *dev = (struct virtio_dev *)arg;
+	int ret = 0;
 	uint8_t actual = (uint8_t)reg;
 
+	mutex_lock(&viornd_mtx);
 	switch (reg & 0xFF00) {
 	case VIO1_CFG_BAR_OFFSET:
 		*data = virtio_io_cfg(dev, dir, actual, *data, sz);
@@ -371,15 +383,18 @@ virtio_io_dispatch(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		}
 		break;
 	case VIO1_NOTIFY_BAR_OFFSET:
-		return virtio_io_notify(dir, actual, data, intr, arg, sz);
+		ret = virtio_io_notify(dir, actual, data, intr, arg, sz);
+		break;
 	case VIO1_ISR_BAR_OFFSET:
-		return virtio_io_isr(dir, actual, data, intr, arg, sz);
+		ret = virtio_io_isr(dir, actual, data, intr, arg, sz);
+		break;
 	default:
 		DPRINTF("%s: no handler for reg 0x%04x", __func__, reg);
 		if (dir == VEI_DIR_IN)
 			*data = (uint32_t)(-1);
 	}
-	return (0);
+	mutex_unlock(&viornd_mtx);
+	return (ret);
 }
 
 /*
@@ -795,7 +810,7 @@ vmmci_ctl(struct virtio_dev *dev, unsigned int cmd)
 			vcpu_assert_irq(dev->vmm_id, 0, dev->irq);
 		} else {
 			log_debug("%s: RTC sync skipped (guest does not "
-			    "support RTC sync)\n", __func__);
+			    "support RTC sync)", __func__);
 		}
 		break;
 	default:
@@ -1027,6 +1042,16 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 
 	SLIST_INIT(&virtio_devs);
 
+	if (pthread_mutex_init(&vcpu_sync_mtx, NULL) != 0)
+		fatalx("%s: could not initialize sync io mutex", __func__);
+
+	ret = pthread_mutex_init(&viornd_mtx, NULL);
+	if (ret) {
+		errno = ret;
+		log_warn("could not initialize entropy device mutex");
+		return (1);
+	}
+
 	/* Virtio 1.x Entropy Device */
 	if (pci_add_device(&id, PCI_VENDOR_QUMRANET,
 	    PCI_PRODUCT_QUMRANET_VIO1_RNG, PCI_CLASS_SYSTEM,
@@ -1061,6 +1086,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 				PCI_SUBCLASS_SYSTEM_MISC, PCI_VENDOR_OPENBSD,
 				PCI_PRODUCT_VIRTIO_NETWORK, 1, 1, NULL)) {
 				log_warnx("can't add PCI virtio net device");
+				free(dev);
 				return (1);
 			}
 			virtio_dev_init(vm, dev, id, VIONET_QUEUE_SIZE_DEFAULT,
@@ -1071,6 +1097,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			    dev) == -1) {
 				log_warnx("can't add bar for virtio net "
 				    "device");
+				free(dev);
 				return (1);
 			}
 			virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG,
@@ -1127,6 +1154,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			    PCI_PRODUCT_VIRTIO_BLOCK, 1, 1, NULL)) {
 				log_warnx("can't add PCI virtio block "
 				    "device");
+				free(dev);
 				return (1);
 			}
 			virtio_dev_init(vm, dev, id, VIOBLK_QUEUE_SIZE_DEFAULT,
@@ -1138,6 +1166,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			if (bar_id == -1 || bar_id > 0xff) {
 				log_warnx("can't add bar for virtio block "
 				    "device");
+				free(dev);
 				return (1);
 			}
 			virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG,
@@ -1181,6 +1210,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 		    PCI_SUBCLASS_MASS_STORAGE_SCSI, PCI_VENDOR_OPENBSD,
 		    PCI_PRODUCT_VIRTIO_SCSI, 1, 1, NULL)) {
 			log_warnx("can't add PCI vioscsi device");
+			free(dev);
 			return (1);
 		}
 		virtio_dev_init(vm, dev, id, VIOSCSI_QUEUE_SIZE_DEFAULT,
@@ -1188,6 +1218,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 		if (pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io, dev)
 		    == -1) {
 			log_warnx("can't add bar for vioscsi device");
+			free(dev);
 			return (1);
 		}
 		virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG, bar_id, 0);
@@ -1657,7 +1688,7 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 		memset(num, 0, sizeof(num));
 		snprintf(num, sizeof(num), "%d", sync_fds[1]);
 		memset(vmm_fd, 0, sizeof(vmm_fd));
-		snprintf(vmm_fd, sizeof(vmm_fd), "%d", env->vmd_fd);
+		snprintf(vmm_fd, sizeof(vmm_fd), "%d", env->vmd_vmm_fd);
 		memset(vm_name, 0, sizeof(vm_name));
 		snprintf(vm_name, sizeof(vm_name), "%s",
 		    vm->vm_params.vmc_name);
@@ -1736,7 +1767,7 @@ virtio_dispatch_dev(int fd, short event, void *arg)
 	struct imsgbuf		*ibuf = &iev->ibuf;
 	struct imsg		 imsg;
 	struct viodev_msg	 msg;
-	ssize_t			 n = 0;
+	int			 n;
 	uint32_t		 type;
 
 	if (event & EV_READ) {
@@ -1765,8 +1796,8 @@ virtio_dispatch_dev(int fd, short event, void *arg)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get", __func__);
 		if (n == 0)
 			break;
 
@@ -1835,6 +1866,8 @@ virtio_pci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 	struct viodev_msg msg;
 	int ret = 0;
 
+	mutex_lock(&vcpu_sync_mtx);
+
 	memset(&msg, 0, sizeof(msg));
 	msg.reg = reg;
 	msg.io_sz = sz;
@@ -1855,11 +1888,12 @@ virtio_pci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		if (ret == -1) {
 			log_warn("%s: failed to send async io event to virtio"
 			    " device", __func__);
-			return (ret);
+			goto out;
 		}
 		if (imsgbuf_flush(ibuf) == -1) {
 			log_warnx("%s: imsgbuf_flush (write)", __func__);
-			return (-1);
+			ret = -1;
+			goto out;
 		}
 	} else {
 		/*
@@ -1870,18 +1904,20 @@ virtio_pci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		if (ret == -1) {
 			log_warnx("%s: failed to send sync io event to virtio"
 			    " device", __func__);
-			return (ret);
+			goto out;
 		}
 		if (imsgbuf_flush(ibuf) == -1) {
 			log_warnx("%s: imsgbuf_flush (read)", __func__);
-			return (-1);
+			ret = -1;
+			goto out;
 		}
 
 		/* Read our reply. */
 		ret = imsgbuf_read_one(ibuf, &imsg);
 		if (ret == 0 || ret == -1) {
 			log_warn("%s: imsgbuf_read (n=%d)", __func__, ret);
-			return (-1);
+			ret = -1;
+			goto out;
 		}
 		viodev_msg_read(&imsg, &msg);
 		imsg_free(&imsg);
@@ -1901,11 +1937,15 @@ virtio_pci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		} else {
 			log_warnx("%s: expected IO_READ, got %d", __func__,
 			    msg.type);
-			return (-1);
+			ret = -1;
+			goto out;
 		}
 	}
 
-	return (0);
+	ret = 0;
+out:
+	mutex_unlock(&vcpu_sync_mtx);
+	return (ret);
 }
 
 void

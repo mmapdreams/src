@@ -1,4 +1,4 @@
-/*	$OpenBSD: riscvreg.h,v 1.6 2026/05/09 17:38:50 jsing Exp $	*/
+/*	$OpenBSD: riscvreg.h,v 1.8 2026/07/24 10:51:00 kettenis Exp $	*/
 
 /*-
  * Copyright (c) 2019 Brian Bamsch <bbamsch@google.com>
@@ -162,6 +162,9 @@
 #define UIP_UTIP	(1 << 4)
 #define UIP_UEIP	(1 << 8)
 
+#define STOPEI_ID_MASK	(0x7ff << STOPEI_ID_SHIFT)
+#define STOPEI_ID_SHIFT	16
+
 #define PPN(pa)			((pa) >> PAGE_SHIFT)
 #define SATP_PPN_SHIFT		0
 #define SATP_PPN_MASK		(0xfffffffffffULL << SATP_PPN_SHIFT)
@@ -212,13 +215,14 @@
 	(__builtin_constant_p(val) && ((u_long)(val) < 32))
 
 #define csr_swap(csr, val)						\
-({	if (CSR_ZIMM(val))						\
+({	u_long ret;							\
+	if (CSR_ZIMM(val))						\
 		__asm volatile("csrrwi %0, " #csr ", %1"		\
-				: "=r" (val) : "i" (val));		\
+				: "=r" (ret) : "i" (val));		\
 	else								\
-		__asm volatile("csrrw %0, " #csr ", %1"		\
-				: "=r" (val) : "r" (val));		\
-	val;								\
+		__asm volatile("csrrw %0, " #csr ", %1"			\
+				: "=r" (ret) : "r" (val));		\
+	ret;								\
 })
 
 #define csr_write(csr, val)						\

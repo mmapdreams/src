@@ -1,4 +1,4 @@
-/*	$OpenBSD: eigrpd.c,v 1.36 2024/11/21 13:38:14 claudio Exp $ */
+/*	$OpenBSD: eigrpd.c,v 1.39 2026/08/03 18:48:06 claudio Exp $ */
 
 /*
  * Copyright (c) 2015 Renato Westphal <renato@openbsd.org>
@@ -371,8 +371,7 @@ main_dispatch_eigrpe(int fd, short event, void *bula)
 	struct imsgev		*iev = bula;
 	struct imsgbuf		*ibuf;
 	struct imsg		 imsg;
-	ssize_t			 n;
-	int			 shut = 0, verbose;
+	int			 n, shut = 0, verbose;
 
 	ibuf = &iev->ibuf;
 
@@ -392,9 +391,8 @@ main_dispatch_eigrpe(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("imsg_get");
-
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("imsgbuf_get");
 		if (n == 0)
 			break;
 
@@ -423,9 +421,11 @@ main_dispatch_eigrpe(int fd, short event, void *bula)
 				log_warnx("IFINFO request with wrong len");
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
-			/* already checked by eigrpe */
-			memcpy(&verbose, imsg.data, sizeof(verbose));
-			log_verbose(verbose);
+			if (imsg_get_data(&imsg, &verbose, sizeof(verbose)) ==
+			    -1)
+				log_warnx("%s: wrong imsg len", __func__);
+			else
+				log_verbose(verbose);
 			break;
 		default:
 			log_debug("%s: error handling imsg %d", __func__,
@@ -449,8 +449,7 @@ main_dispatch_rde(int fd, short event, void *bula)
 	struct imsgev	*iev = bula;
 	struct imsgbuf  *ibuf;
 	struct imsg	 imsg;
-	ssize_t		 n;
-	int		 shut = 0;
+	int		 n, shut = 0;
 
 	ibuf = &iev->ibuf;
 
@@ -470,9 +469,8 @@ main_dispatch_rde(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("imsg_get");
-
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("imsgbuf_get");
 		if (n == 0)
 			break;
 

@@ -1,7 +1,7 @@
-/* $OpenBSD: monitor.c,v 1.1 2026/07/03 22:58:23 nicm Exp $ */
+/* $OpenBSD: monitor.c,v 1.7 2026/07/27 19:15:58 nicm Exp $ */
 
 /*
- * Copyright (c) 2026 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2026 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -29,6 +29,7 @@ struct monitor_pane {
 	u_int				 pane;
 	u_int				 idx;
 	char				*last;
+	u_int				 generation;
 
 	RB_ENTRY(monitor_pane)		 entry;
 };
@@ -39,6 +40,7 @@ struct monitor_window {
 	u_int				 window;
 	u_int				 idx;
 	char				*last;
+	u_int				 generation;
 
 	RB_ENTRY(monitor_window)	 entry;
 };
@@ -51,10 +53,14 @@ struct monitor_item {
 
 	enum monitor_type		 type;
 	u_int				 id;
+	int				 flags;
 
 	char				*last;
 	struct monitor_panes		 panes;
 	struct monitor_windows		 windows;
+
+	u_int				 fire_count;
+	time_t				 fire_time;
 
 	RB_ENTRY(monitor_item)		 entry;
 };
@@ -63,14 +69,44 @@ RB_HEAD(monitor_items, monitor_item);
 /* Monitored subscription set. */
 struct monitor_set {
 	struct client			*client;
+	struct session			*session;
 	monitor_cb			 cb;
 	void				*data;
 
 	struct monitor_items		 items;
 	struct event			 timer;
+	u_int				 generation;
 };
 
 static void	monitor_timer(__unused int, __unused short, void *);
+
+/* Get the session for this monitor set. */
+static struct session *
+monitor_get_session(struct monitor_set *ms)
+{
+	struct session	*s;
+
+	if (ms->client != NULL)
+		return (ms->client->session);
+	s = ms->session;
+	if (s == NULL)
+		return (RB_MIN(sessions, &sessions));
+	if (session_find_by_id(s->id) != s)
+		return (NULL);
+	return (s);
+}
+
+/* Create a format tree for a subscription. */
+static struct format_tree *
+monitor_create_formats(struct client *c, struct session *s, struct winlink *wl,
+    struct window_pane *wp)
+{
+	struct format_tree	*ft;
+
+	ft = format_create(NULL, NULL, 0, FORMAT_NOJOBS);
+	format_defaults(ft, c, s, wl, wp);
+	return (ft);
+}
 
 /* Compare subscriptions. */
 static int
@@ -141,18 +177,49 @@ monitor_free_item(struct monitor_set *ms, struct monitor_item *me)
 static void
 monitor_report(struct monitor_set *ms, struct monitor_item *me,
     struct session *s, struct winlink *wl, struct window_pane *wp,
-    const char *value)
+    const char *value, const char *last)
 {
-	struct monitor_change	change;
+	struct monitor_change	change = { 0 };
+
+	log_debug("%s: %s changed to %s", __func__, me->name, value);
+
+	me->fire_count++;
+	me->fire_time = current_time;
 
 	change.name = me->name;
 	change.value = value;
+	change.last = last;
 	change.c = ms->client;
 	change.s = s;
 	change.wl = wl;
 	change.wp = wp;
-	log_debug("%s: %s changed to %s", __func__, me->name, value);
 	ms->cb(&change, ms->data);
+}
+
+/* Check a value against its last value and report if changed. */
+static void
+monitor_check_value(struct monitor_set *ms, struct monitor_item *me,
+    struct session *s, struct winlink *wl, struct window_pane *wp,
+    char *value, char **last)
+{
+	if (*last == NULL) {
+		*last = value;
+		if ((me->flags & MONITOR_NOTIFY_INITIAL) &&
+		    ((~me->flags & MONITOR_NOTIFY_TRUE) ||
+		    format_true(value)))
+			monitor_report(ms, me, s, wl, wp, value, NULL);
+		return;
+	}
+
+	if (strcmp(value, *last) == 0) {
+		free(value);
+		return;
+	}
+
+	if ((~me->flags & MONITOR_NOTIFY_TRUE) || format_true(value))
+		monitor_report(ms, me, s, wl, wp, value, *last);
+	free(*last);
+	*last = value;
 }
 
 /* Check session subscription. */
@@ -160,19 +227,12 @@ static void
 monitor_check_session(struct monitor_set *ms, struct monitor_item *me,
     struct format_tree *ft)
 {
-	struct session	*s = ms->client->session;
+	struct session	*s = monitor_get_session(ms);
 	char		*value;
 
 	value = format_expand(ft, me->format);
 
-	if (me->last != NULL && strcmp(value, me->last) == 0) {
-		free(value);
-		return;
-	}
-
-	monitor_report(ms, me, s, NULL, NULL, value);
-	free(me->last);
-	me->last = value;
+	monitor_check_value(ms, me, s, NULL, NULL, value, &me->last);
 }
 
 /* Check pane subscription. */
@@ -180,7 +240,7 @@ static void
 monitor_check_pane(struct monitor_set *ms, struct monitor_item *me)
 {
 	struct client		*c = ms->client;
-	struct session		*s = c->session;
+	struct session		*s = monitor_get_session(ms);
 	struct window_pane	*wp;
 	struct window		*w;
 	struct winlink		*wl;
@@ -197,7 +257,7 @@ monitor_check_pane(struct monitor_set *ms, struct monitor_item *me)
 		if (wl->session != s)
 			continue;
 
-		ft = format_create_defaults(NULL, c, s, wl, wp);
+		ft = monitor_create_formats(c, s, wl, wp);
 		value = format_expand(ft, me->format);
 		format_free(ft);
 
@@ -211,14 +271,7 @@ monitor_check_pane(struct monitor_set *ms, struct monitor_item *me)
 			RB_INSERT(monitor_panes, &me->panes, mp);
 		}
 
-		if (mp->last != NULL && strcmp(value, mp->last) == 0) {
-			free(value);
-			continue;
-		}
-
-		monitor_report(ms, me, s, wl, wp, value);
-		free(mp->last);
-		mp->last = value;
+		monitor_check_value(ms, me, s, wl, wp, value, &mp->last);
 	}
 }
 
@@ -227,7 +280,7 @@ static void
 monitor_check_all_panes_one(struct monitor_set *ms, struct monitor_item *me,
     struct format_tree *ft, struct winlink *wl, struct window_pane *wp)
 {
-	struct session		*s = ms->client->session;
+	struct session		*s = monitor_get_session(ms);
 	char			*value;
 	struct monitor_pane	*mp, find;
 
@@ -242,15 +295,24 @@ monitor_check_all_panes_one(struct monitor_set *ms, struct monitor_item *me,
 		mp->idx = wl->idx;
 		RB_INSERT(monitor_panes, &me->panes, mp);
 	}
+	mp->generation = ms->generation;
 
-	if (mp->last != NULL && strcmp(value, mp->last) == 0) {
-		free(value);
-		return;
+	monitor_check_value(ms, me, s, wl, wp, value, &mp->last);
+}
+
+/* Remove all-panes entries not seen during the current scan. */
+static void
+monitor_sweep_all_panes(struct monitor_item *me, u_int generation)
+{
+	struct monitor_pane	*mp, *mp1;
+
+	RB_FOREACH_SAFE(mp, monitor_panes, &me->panes, mp1) {
+		if (mp->generation == generation)
+			continue;
+		RB_REMOVE(monitor_panes, &me->panes, mp);
+		free(mp->last);
+		free(mp);
 	}
-
-	monitor_report(ms, me, s, wl, wp, value);
-	free(mp->last);
-	mp->last = value;
 }
 
 /* Check window subscription. */
@@ -258,7 +320,7 @@ static void
 monitor_check_window(struct monitor_set *ms, struct monitor_item *me)
 {
 	struct client		*c = ms->client;
-	struct session		*s = c->session;
+	struct session		*s = monitor_get_session(ms);
 	struct window		*w;
 	struct winlink		*wl;
 	struct format_tree	*ft;
@@ -273,7 +335,7 @@ monitor_check_window(struct monitor_set *ms, struct monitor_item *me)
 		if (wl->session != s)
 			continue;
 
-		ft = format_create_defaults(NULL, c, s, wl, NULL);
+		ft = monitor_create_formats(c, s, wl, NULL);
 		value = format_expand(ft, me->format);
 		format_free(ft);
 
@@ -287,14 +349,7 @@ monitor_check_window(struct monitor_set *ms, struct monitor_item *me)
 			RB_INSERT(monitor_windows, &me->windows, mw);
 		}
 
-		if (mw->last != NULL && strcmp(value, mw->last) == 0) {
-			free(value);
-			continue;
-		}
-
-		monitor_report(ms, me, s, wl, NULL, value);
-		free(mw->last);
-		mw->last = value;
+		monitor_check_value(ms, me, s, wl, NULL, value, &mw->last);
 	}
 }
 
@@ -303,7 +358,7 @@ static void
 monitor_check_all_windows_one(struct monitor_set *ms, struct monitor_item *me,
     struct format_tree *ft, struct winlink *wl)
 {
-	struct session		*s = ms->client->session;
+	struct session		*s = monitor_get_session(ms);
 	struct window		*w = wl->window;
 	char			*value;
 	struct monitor_window	*mw, find;
@@ -319,15 +374,24 @@ monitor_check_all_windows_one(struct monitor_set *ms, struct monitor_item *me,
 		mw->idx = wl->idx;
 		RB_INSERT(monitor_windows, &me->windows, mw);
 	}
+	mw->generation = ms->generation;
 
-	if (mw->last != NULL && strcmp(value, mw->last) == 0) {
-		free(value);
-		return;
+	monitor_check_value(ms, me, s, wl, NULL, value, &mw->last);
+}
+
+/* Remove all-windows entries not seen during the current scan. */
+static void
+monitor_sweep_all_windows(struct monitor_item *me, u_int generation)
+{
+	struct monitor_window	*mw, *mw1;
+
+	RB_FOREACH_SAFE(mw, monitor_windows, &me->windows, mw1) {
+		if (mw->generation == generation)
+			continue;
+		RB_REMOVE(monitor_windows, &me->windows, mw);
+		free(mw->last);
+		free(mw);
 	}
-
-	monitor_report(ms, me, s, wl, NULL, value);
-	free(mw->last);
-	mw->last = value;
 }
 
 /* Check session subscriptions. */
@@ -335,11 +399,11 @@ static void
 monitor_check_sessions(struct monitor_set *ms)
 {
 	struct client		*c = ms->client;
-	struct session		*s = c->session;
+	struct session		*s = monitor_get_session(ms);
 	struct monitor_item	*me, *me1;
 	struct format_tree	*ft;
 
-	ft = format_create_defaults(NULL, c, s, NULL, NULL);
+	ft = monitor_create_formats(c, s, NULL, NULL);
 	RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1) {
 		if (me->type == MONITOR_SESSION)
 			monitor_check_session(ms, me, ft);
@@ -374,15 +438,17 @@ static void
 monitor_check_all_panes(struct monitor_set *ms)
 {
 	struct client		*c = ms->client;
-	struct session		*s = c->session;
+	struct session		*s = monitor_get_session(ms);
 	struct monitor_item	*me, *me1;
 	struct window_pane	*wp;
 	struct format_tree	*ft;
 	struct winlink		*wl;
 
+	if (++ms->generation == 0)
+		ms->generation = 1;
 	RB_FOREACH(wl, winlinks, &s->windows) {
 		TAILQ_FOREACH(wp, &wl->window->panes, entry) {
-			ft = format_create_defaults(NULL, c, s, wl, wp);
+			ft = monitor_create_formats(c, s, wl, wp);
 			RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1) {
 				if (me->type != MONITOR_ALL_PANES)
 					continue;
@@ -391,6 +457,10 @@ monitor_check_all_panes(struct monitor_set *ms)
 			format_free(ft);
 		}
 	}
+	RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1) {
+		if (me->type == MONITOR_ALL_PANES)
+			monitor_sweep_all_panes(me, ms->generation);
+	}
 }
 
 /* Check all-windows subscriptions. */
@@ -398,19 +468,25 @@ static void
 monitor_check_all_windows(struct monitor_set *ms)
 {
 	struct client		*c = ms->client;
-	struct session		*s = c->session;
+	struct session		*s = monitor_get_session(ms);
 	struct monitor_item	*me, *me1;
 	struct format_tree	*ft;
 	struct winlink		*wl;
 
+	if (++ms->generation == 0)
+		ms->generation = 1;
 	RB_FOREACH(wl, winlinks, &s->windows) {
-		ft = format_create_defaults(NULL, c, s, wl, NULL);
+		ft = monitor_create_formats(c, s, wl, NULL);
 		RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1) {
 			if (me->type != MONITOR_ALL_WINDOWS)
 				continue;
 			monitor_check_all_windows_one(ms, me, ft, wl);
 		}
 		format_free(ft);
+	}
+	RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1) {
+		if (me->type == MONITOR_ALL_WINDOWS)
+			monitor_sweep_all_windows(me, ms->generation);
 	}
 }
 
@@ -419,7 +495,6 @@ static void
 monitor_timer(__unused int fd, __unused short events, void *data)
 {
 	struct monitor_set	*ms = data;
-	struct client		*c = ms->client;
 	struct monitor_item	*me;
 	struct timeval		 tv = { .tv_sec = 1 };
 	int			 have_session = 0, have_all_panes = 0;
@@ -428,7 +503,7 @@ monitor_timer(__unused int fd, __unused short events, void *data)
 	log_debug("%s: timer fired", __func__);
 	evtimer_add(&ms->timer, &tv);
 
-	if (c->session == NULL)
+	if (monitor_get_session(ms) == NULL)
 		return;
 
 	RB_FOREACH(me, monitor_items, &ms->items) {
@@ -458,16 +533,39 @@ monitor_timer(__unused int fd, __unused short events, void *data)
 }
 
 /* Create a monitor set. */
-struct monitor_set *
-monitor_create(struct client *c, monitor_cb cb, void *data)
+static struct monitor_set *
+monitor_create(monitor_cb cb, void *data)
 {
 	struct monitor_set	*ms;
 
 	ms = xcalloc(1, sizeof *ms);
-	ms->client = c;
 	ms->cb = cb;
 	ms->data = data;
 	RB_INIT(&ms->items);
+	return (ms);
+}
+
+/* Create a client monitor set. */
+struct monitor_set *
+monitor_create_client(struct client *c, monitor_cb cb, void *data)
+{
+	struct monitor_set	*ms;
+
+	ms = monitor_create(cb, data);
+	ms->client = c;
+	return (ms);
+}
+
+/* Create a monitor set for a session. */
+struct monitor_set *
+monitor_create_session(struct session *s, monitor_cb cb, void *data)
+{
+	struct monitor_set	*ms;
+
+	ms = monitor_create(cb, data);
+	ms->session = s;
+	if (s != NULL)
+		session_add_ref(s, __func__);
 	return (ms);
 }
 
@@ -477,20 +575,62 @@ monitor_destroy(struct monitor_set *ms)
 {
 	struct monitor_item	*me, *me1;
 
-	if (ms == NULL)
-		return;
+	if (ms != NULL) {
+		if (evtimer_initialized(&ms->timer))
+			evtimer_del(&ms->timer);
+		RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1)
+			monitor_free_item(ms, me);
+		if (ms->session != NULL)
+			session_remove_ref(ms->session, __func__);
+		free(ms);
+	}
+}
 
-	if (evtimer_initialized(&ms->timer))
-		evtimer_del(&ms->timer);
-	RB_FOREACH_SAFE(me, monitor_items, &ms->items, me1)
-		monitor_free_item(ms, me);
-	free(ms);
+/* Parse a subscription. */
+int
+monitor_parse(const char *value, char **name, enum monitor_type *type, int *id,
+    char **format)
+{
+	char	*copy, *what, *split;
+
+	copy = xstrdup(value);
+	*id = -1;
+
+	what = strchr(copy, ':');
+	if (what == NULL)
+		goto fail;
+	*what++ = '\0';
+
+	split = strchr(what, ':');
+	if (split == NULL)
+		goto fail;
+	*split++ = '\0';
+
+	if (strcmp(what, "%*") == 0)
+		*type = MONITOR_ALL_PANES;
+	else if (sscanf(what, "%%%d", id) == 1 && *id >= 0)
+		*type = MONITOR_PANE;
+	else if (strcmp(what, "@*") == 0)
+		*type = MONITOR_ALL_WINDOWS;
+	else if (sscanf(what, "@%d", id) == 1 && *id >= 0)
+		*type = MONITOR_WINDOW;
+	else
+		*type = MONITOR_SESSION;
+	*name = xstrdup(copy);
+	*format = xstrdup(split);
+
+	free(copy);
+	return (0);
+
+fail:
+	free(copy);
+	return (-1);
 }
 
 /* Add a subscription. */
 void
 monitor_add(struct monitor_set *ms, const char *name, enum monitor_type type,
-    int id, const char *format)
+    int id, const char *format, int flags)
 {
 	struct monitor_item	*me, find = { .name = (char *)name };
 	struct timeval		 tv = { .tv_sec = 1 };
@@ -503,6 +643,7 @@ monitor_add(struct monitor_set *ms, const char *name, enum monitor_type type,
 	me->format = xstrdup(format);
 	me->type = type;
 	me->id = id;
+	me->flags = flags;
 	RB_INIT(&me->panes);
 	RB_INIT(&me->windows);
 	RB_INSERT(monitor_items, &ms->items, me);
@@ -523,4 +664,26 @@ monitor_remove(struct monitor_set *ms, const char *name)
 		monitor_free_item(ms, me);
 	if (RB_EMPTY(&ms->items) && evtimer_initialized(&ms->timer))
 		evtimer_del(&ms->timer);
+}
+
+/* Get subscription firing count. */
+u_int
+monitor_get_fire_count(struct monitor_set *ms, const char *name)
+{
+	struct monitor_item	*me, find = { .name = (char *)name };
+
+	if ((me = RB_FIND(monitor_items, &ms->items, &find)) == NULL)
+		return (0);
+	return (me->fire_count);
+}
+
+/* Get subscription firing time. */
+time_t
+monitor_get_fire_time(struct monitor_set *ms, const char *name)
+{
+	struct monitor_item	*me, find = { .name = (char *)name };
+
+	if ((me = RB_FIND(monitor_items, &ms->items, &find)) == NULL)
+		return (0);
+	return (me->fire_time);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ice.c,v 1.69 2026/06/23 14:40:40 bluhm Exp $	*/
+/*	$OpenBSD: if_ice.c,v 1.71 2026/07/22 15:36:30 jan Exp $	*/
 
 /*  Copyright (c) 2024, Intel Corporation
  *  All rights reserved.
@@ -13853,21 +13853,17 @@ ice_tso_detect_sparse(struct mbuf *m, struct ether_extracted *ext,
 {
 	int count, curseg, i, hlen, segsz, seglen, hdrs, maxsegs;
 	bus_dma_segment_t *segs;
-	uint64_t paylen, outlen, nsegs;
-
-	curseg = hdrs = 0;
+	uint64_t paylen;
 
 	hlen = ETHER_HDR_LEN + ext->iphlen + ext->tcphlen;
-	outlen = MIN(9668, MAX(64, m->m_pkthdr.ph_mss));
-	paylen = m->m_pkthdr.len - hlen;
-	nsegs = (paylen + outlen - 1) / outlen;
-
+	paylen = ext->paylen;
 	segs = map->dm_segs;
 
 	/* First, count the number of descriptors for the header.
 	 * Additionally, make sure it does not span more than 3 segments.
 	 */
 	i = 0;
+	hdrs = 0;
 	curseg = segs[0].ds_len;
 	while (hlen > 0) {
 		hdrs++;
@@ -13875,9 +13871,8 @@ ice_tso_detect_sparse(struct mbuf *m, struct ether_extracted *ext,
 			return (1);
 		if (curseg == 0) {
 			i++;
-			if (i == nsegs)
+			if (i == map->dm_nsegs)
 				return (1);
-
 			curseg = segs[i].ds_len;
 		}
 		seglen = MIN(curseg, hlen);
@@ -13885,22 +13880,21 @@ ice_tso_detect_sparse(struct mbuf *m, struct ether_extracted *ext,
 		hlen -= seglen;
 	}
 
-	maxsegs = ICE_MAX_TSO_SEGS - hdrs;
+	maxsegs = ICE_MAX_TX_SEGS - hdrs;
 
 	/* We must count the headers, in order to verify that they take up
-	 * 128 or fewer descriptors. However, we don't need to check the data
+	 * 3 or fewer descriptors.  However, we don't need to check the data
 	 * if the total segments is small.
 	 */
-	if (nsegs <= maxsegs)
+	if (map->dm_nsegs <= maxsegs)
 		return (0);
-
-	count = 0;
 
 	/* Now check the data to make sure that each TSO segment is made up of
 	 * no more than maxsegs descriptors. This ensures that hardware will
 	 * be capable of performing TSO offload.
 	 */
 	while (paylen > 0) {
+		count = 0;
 		segsz = m->m_pkthdr.ph_mss;
 		while (segsz > 0 && paylen != 0) {
 			count++;
@@ -13908,7 +13902,7 @@ ice_tso_detect_sparse(struct mbuf *m, struct ether_extracted *ext,
 				return (1);
 			if (curseg == 0) {
 				i++;
-				if (i == nsegs)
+				if (i == map->dm_nsegs)
 					return (1);
 				curseg = segs[i].ds_len;
 			}
@@ -13917,7 +13911,6 @@ ice_tso_detect_sparse(struct mbuf *m, struct ether_extracted *ext,
 			curseg -= seglen;
 			paylen -= seglen;
 		}
-		count = 0;
 	}
 
 	return (0);
@@ -24125,7 +24118,7 @@ ice_update_link_status(struct ice_softc *sc, bool update_media)
 				ice_set_default_local_lldp_mib(sc);
 
 			ifp->if_baudrate = baudrate;
-			ifp->if_link_state = LINK_STATE_UP;
+			ifp->if_link_state = LINK_STATE_FULL_DUPLEX;
 			if_link_state_change(ifp);
 #if 0
 			ice_rdma_link_change(sc, LINK_STATE_UP, baudrate);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty.c,v 1.183 2026/04/16 14:51:36 deraadt Exp $	*/
+/*	$OpenBSD: tty.c,v 1.185 2026/08/15 16:24:25 deraadt Exp $	*/
 /*	$NetBSD: tty.c,v 1.68.4.2 1996/06/06 16:04:52 thorpej Exp $	*/
 
 /*-
@@ -844,6 +844,8 @@ ttioctl(struct tty *tp, u_long cmd, caddr_t data, int flag, struct proc *p)
 		break;
 	case TIOCGSID:			/* get sid of tty */
 		if (!isctty(pr, tp))
+			return (ENOTTY);
+		if (tp->t_session->s_leader == NULL)	/* XXX session stored wrong */
 			return (ENOTTY);
 		*(int *)data = tp->t_session->s_leader->ps_pid;
 		break;
@@ -2408,7 +2410,6 @@ ttystats_init(struct itty **ttystats, int *ttycp, size_t *ttystatssiz)
 	int ntty = 0, ttyc;
 	struct itty *itp;
 	struct tty *tp;
-	int show_pointers = suser(curproc) == 0;
 
 	ttyc = tty_count;
 	*ttystatssiz = ttyc * sizeof(struct itty);
@@ -2427,8 +2428,8 @@ ttystats_init(struct itty **ttystats, int *ttycp, size_t *ttystatssiz)
 		if (ISSET(tp->t_oflag, OPOST))
 			itp->t_column = tp->t_column;
 		itp->t_state = tp->t_state;
-		if (show_pointers)
-			itp->t_session = tp->t_session;
+		if (tp->t_session && tp->t_session->s_leader)
+			itp->t_session_id = tp->t_session->s_leader->ps_pid;
 		if (tp->t_pgrp)
 			itp->t_pgrp_pg_id = tp->t_pgrp->pg_id;
 		else

@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.265 2026/05/31 12:44:06 rsadowski Exp $	*/
+/*	$OpenBSD: parse.y,v 1.269 2026/08/12 19:29:34 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -172,18 +172,30 @@ typedef struct {
 
 %}
 
-%token	AGENTX APPEND BACKLOG BACKUP BINARY BUFFER CA CACHE SET CHECK CIPHERS
-%token	CODE COOKIE DEMOTE DIGEST DISABLE ERROR EXPECT PASS BLOCK EXTERNAL
-%token	FILENAME FORWARD FROM HASH HEADER HEADERLEN HOST HTTP ICMP INCLUDE INET
-%token	INET6 INTERFACE INTERVAL IP KEYPAIR LABEL LISTEN VALUE LOADBALANCE LOG
-%token	LOOKUP METHOD MODE NAT NO DESTINATION NODELAY NOTHING OCSP ON PARENT
-%token	PATH PFTAG PORT PREFORK PRIORITY PROTO QUERYSTR REAL REDIRECT RELAY
-%token	REMOVE REQUEST RESPONSE RETRY QUICK RETURN ROUNDROBIN ROUTE SACK SCRIPT
-%token	SEND SESSION SOCKET SPLICE STICKYADDR STRIP STYLE TABLE TAG TAGGED TCP
-%token	TIMEOUT TLS TO ROUTER RTLABEL TRANSPARENT URL WITH TTL RTABLE
-%token	MATCH PARAMS RANDOM LEASTSTATES SRCHASH KEY CERTIFICATE PASSWORD ECDHE
-%token	EDH TICKETS CONNECTION CONNECTIONS CONTEXT ERRORS STATE CHANGES CHECKS
-%token	WEBSOCKETS PFLOG CLIENT PROXYPROTO V1 V2
+%token	AGENTX APPEND
+%token	BACKLOG BINARY BLOCK BUFFER BRIEF
+%token	CA CACHE CERTIFICATE CHANGES CHECK CHECKS CIPHERS CLIENT CODE CONNECTION
+%token	CONNECTIONS CONTEXT COOKIE
+%token	DEMOTE DESTINATION DIGEST DISABLE
+%token	ECDHE EDH ERROR ERRORS EXPECT EXTERNAL
+%token	FILENAME FORWARD FROM
+%token	HASH HEADER HEADERLEN HOST HTTP
+%token	ICMP INCLUDE INET INET6 INTERFACE INTERVAL IP
+%token	KEY KEYPAIR
+%token	LABEL LEASTSTATES LISTEN LOADBALANCE LOG LOOKUP
+%token	MATCH METHOD MODE NAT NO NODELAY NOTHING
+%token	OCSP ON
+%token	PARAMS PARENT PASS PASSWORD PATH PFLOG PFTAG PORT PREFORK PRIORITY
+%token	PROTO PROXYPROTO
+%token	QUERYSTR QUICK
+%token	RANDOM REAL REDIRECT RELAY REMOVE REQUEST RESPONSE RETRY RETURN
+%token	ROUNDROBIN ROUTE ROUTER RTABLE RTLABEL
+%token	SACK SCRIPT SEND SESSION SET SOCKET SPLICE SRCHASH STATE STICKYADDR
+%token	STRIP STYLE
+%token	TABLE TAG TAGGED TCP TICKETS TIMEOUT TLS TO TRANSPARENT TTL
+%token	URL
+%token	V1 V2 VALUE VERBOSE LEVEL
+%token	WEBSOCKETS WITH
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
 %type	<v.string>	context hostname interface table value path
@@ -411,6 +423,12 @@ main		: INTERVAL NUMBER	{
 		}
 		| LOG loglevel		{
 			conf->sc_conf.opts |= $2;
+		}
+		| LOG LEVEL VERBOSE	{
+			conf->sc_conf.opts |= RELAYD_OPT_VERBOSE;
+		}
+		| LOG LEVEL BRIEF	{
+			conf->sc_conf.opts &= ~RELAYD_OPT_VERBOSE;
 		}
 		| TIMEOUT timeout	{
 			bcopy(&$2, &conf->sc_conf.timeout,
@@ -2154,8 +2172,6 @@ forwardspec	: STRING port retry	{
 			rlt->rlt_table->conf.flags |= F_USED;
 			rlt->rlt_mode = dstmode;
 			rlt->rlt_flags = F_USED;
-			if (!TAILQ_EMPTY(&rlay->rl_tables))
-				rlt->rlt_flags |= F_BACKUP;
 
 			if (hashkey != NULL &&
 			    (rlay->rl_conf.flags & F_HASHKEY) == 0) {
@@ -2521,9 +2537,9 @@ lookup(char *s)
 		{ "agentx",		AGENTX },
 		{ "append",		APPEND },
 		{ "backlog",		BACKLOG },
-		{ "backup",		BACKUP },
 		{ "binary",		BINARY },
 		{ "block",		BLOCK },
+		{ "brief",		BRIEF },
 		{ "buffer",		BUFFER },
 		{ "ca",			CA },
 		{ "cache",		CACHE },
@@ -2566,6 +2582,7 @@ lookup(char *s)
 		{ "keypair",		KEYPAIR },
 		{ "label",		LABEL },
 		{ "least-states",	LEASTSTATES },
+		{ "level",		LEVEL },
 		{ "listen",		LISTEN },
 		{ "loadbalance",	LOADBALANCE },
 		{ "log",		LOG },
@@ -2632,6 +2649,7 @@ lookup(char *s)
 		{ "v1",			V1 },
 		{ "v2",			V2 },
 		{ "value",		VALUE },
+		{ "verbose",		VERBOSE },
 		{ "websockets",		WEBSOCKETS },
 		{ "with",		WITH }
 	};

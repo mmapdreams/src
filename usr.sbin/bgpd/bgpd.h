@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.h,v 1.544 2026/06/24 06:01:13 claudio Exp $ */
+/*	$OpenBSD: bgpd.h,v 1.547 2026/08/04 08:11:05 job Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -507,8 +507,8 @@ struct peer_config {
 	uint32_t		 groupid;
 	uint32_t		 remote_as;
 	uint32_t		 local_as;
-	uint32_t		 max_prefix;
-	uint32_t		 max_out_prefix;
+	unsigned int		 max_prefix;
+	unsigned int		 max_out_prefix;
 	enum export_type	 export_type;
 	enum enforce_as		 enforce_as;
 	enum enforce_as		 enforce_local_as;
@@ -598,7 +598,7 @@ struct peer_stats {
 	monotime_t		 last_updown;
 	monotime_t		 last_read;
 	monotime_t		 last_write;
-	uint32_t		 msg_queue_len;
+	unsigned int		 msg_queue_len;
 	uint8_t			 last_sent_errcode;
 	uint8_t			 last_sent_suberr;
 	uint8_t			 last_rcvd_errcode;
@@ -607,19 +607,19 @@ struct peer_stats {
 };
 
 struct rde_peer_stats {
-	uint64_t			 prefix_rcvd_update;
-	uint64_t			 prefix_rcvd_withdraw;
-	uint64_t			 prefix_rcvd_eor;
-	uint64_t			 prefix_sent_update;
-	uint64_t			 prefix_sent_withdraw;
-	uint64_t			 prefix_sent_eor;
-	uint64_t			 rib_entry_count;
-	uint64_t			 ibufq_msg_count;
-	uint64_t			 ibufq_payload_size;
-	uint32_t			 prefix_cnt;
-	uint32_t			 prefix_out_cnt;
-	uint32_t			 pending_update;
-	uint32_t			 pending_withdraw;
+	unsigned long long		 prefix_rcvd_update;
+	unsigned long long		 prefix_rcvd_withdraw;
+	unsigned long long		 prefix_rcvd_eor;
+	unsigned long long		 prefix_sent_update;
+	unsigned long long		 prefix_sent_withdraw;
+	unsigned long long		 prefix_sent_eor;
+	unsigned long long		 rib_entry_count;
+	unsigned long long		 ibufq_msg_count;
+	unsigned long long		 ibufq_payload_size;
+	unsigned int			 prefix_cnt;
+	unsigned int			 prefix_out_cnt;
+	unsigned int			 pending_update;
+	unsigned int			 pending_withdraw;
 };
 
 struct ctl_peer {
@@ -704,6 +704,11 @@ enum rtr_error {
 	UNK_REC_WDRAWL,
 	DUP_REC_RECV,
 	UNEXP_PROTOCOL_VERS,
+	ASPA_LIST_ERR,
+	TRANSPORT_ERR,
+	ORDERING_ERR,
+	CACHE_RESTART,
+	CACHE_SHUTDOWN,
 };
 
 struct rtr_config {

@@ -1,4 +1,4 @@
-#   $OpenBSD: tlsfuzzer.py,v 1.57 2025/06/15 09:44:57 tb Exp $
+#   $OpenBSD: tlsfuzzer.py,v 1.63 2026/07/28 10:32:37 tb Exp $
 #
 # Copyright (c) 2020 Theo Buehler <tb@openbsd.org>
 #
@@ -32,7 +32,15 @@ class Test:
 
     XXX Add client cert support.
     """
-    def __init__(self, name="", args=[], tls12_args=[], tls13_args=[]):
+
+    def __init__(self, name="", args=None, tls12_args=None, tls13_args=None):
+        if args is None:
+            args = []
+        if tls12_args is None:
+            tls12_args = []
+        if tls13_args is None:
+            tls13_args = []
+
         self.name = name
         self.tls12_args = args
         self.tls13_args = args
@@ -48,13 +56,15 @@ class Test:
             return self.tls12_args
 
     def __repr__(self):
-        return "<Test: %s tls12_args: %s tls13_args: %s>" % (
-                self.name, self.tls12_args, self.tls13_args
-            )
+        return f"<Test: {self.name} tls12_args: {self.tls12_args} tls13_args: {self.tls13_args}>"
 
 class TestGroup:
-    """ A group of Test objects to be run by TestRunner."""
-    def __init__(self, title="Tests", tests=[]):
+    """A group of Test objects to be run by TestRunner."""
+
+    def __init__(self, title="Tests", tests=None):
+        if tests is None:
+            tests = []
+
         self.title = title
         self.tests = tests
 
@@ -77,7 +87,7 @@ def substitute_alert(want, got):
 # Both alerts appear to be reasonable in this context, so work around this
 # in the test instead of the library.
 def generate_test_tls13_finished_args():
-    assertion = substitute_alert("decode_error", "decrypt_error");
+    assertion = substitute_alert("decode_error", "decrypt_error")
     paddings = [
         ("TLS_AES_128_GCM_SHA256", 0, 1),
         ("TLS_AES_128_GCM_SHA256", 0, 2),
@@ -649,11 +659,11 @@ failing_groups = [
 ]
 
 class TestRunner:
-    """ Runs the given tests against a server and displays stats. """
+    """Runs the given tests against a server and displays stats."""
 
     def __init__(
         self, timing=False, verbose=False, host="localhost", port=4433,
-        use_tls1_3=True, dry_run=False, tests=[], scriptdir=tlsfuzzer_scriptdir,
+        use_tls1_3=True, dry_run=False, scriptdir=tlsfuzzer_scriptdir,
     ):
         self.tests = []
 
@@ -670,8 +680,9 @@ class TestRunner:
         self.timing = timing
         self.verbose = verbose
 
-    def add(self, title="tests", tests=[]):
-        # tests.sort(key=lambda test: test.name)
+    def add(self, title="tests", tests=None):
+        if tests is None:
+            tests = []
         self.tests.append(TestGroup(title, tests))
 
     def add_group(self, group):
@@ -743,7 +754,7 @@ class TestRunner:
             print('\n'.join(self.missing))
 
 class TlsServer:
-    """ Spawns an s_server listening on localhost:port if necessary. """
+    """Spawns an s_server listening on localhost:port if necessary."""
 
     def __init__(self, host="localhost", port=4433):
         self.spawn = True
@@ -821,11 +832,11 @@ def list_or_missing(missing=True):
         missing = scripts - set(tests)
         if missing:
             print('\n'.join(sorted(missing)))
-        exit(0)
+        sys.exit(0)
 
     tests.sort()
     print('\n'.join(tests))
-    exit(0)
+    sys.exit(0)
 
 def usage():
     print("Usage: python3 tlsfuzzer.py [-flmnstv] [-p port] [script [test...]]")
@@ -838,7 +849,7 @@ def usage():
     print(" -s          run slow tests")
     print(" -t          show timing stats at end")
     print(" -v          verbose output")
-    exit(0)
+    sys.exit(0)
 
 def main():
     failing = False
@@ -879,13 +890,13 @@ def main():
 
     if not os.path.exists(tlsfuzzer_scriptdir):
         print("package py3-tlsfuzzer is required for this regress")
-        exit(1)
+        sys.exit(1)
 
     if list and failing:
         failing = [test.name for group in failing_groups for test in group]
         failing.sort()
         print('\n'.join(failing))
-        exit(0)
+        sys.exit(0)
 
     if list or missing:
         list_or_missing(missing)
@@ -896,7 +907,7 @@ def main():
 
     if args:
         (dir, script) = os.path.split(args[0])
-        if dir and not dir == '.':
+        if dir and dir != '.':
             tests.scriptdir = dir
 
         testargs = defaultargs(script, tls_server.has_tls1_3)
@@ -904,7 +915,7 @@ def main():
         tests.verbose = True
         tests.add("test from command line", [Test(script, testargs + args[1:])])
 
-        exit(not tests.run())
+        sys.exit(not tests.run())
 
     if failing:
         if tls_server.has_tls1_3:
@@ -929,7 +940,7 @@ def main():
 
     if not success:
         print("FAILED")
-        exit(1)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_ioctl.c,v 1.431 2026/04/23 01:33:01 jsg Exp $ */
+/*	$OpenBSD: pf_ioctl.c,v 1.433 2026/07/27 19:02:48 gnezdo Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -2218,6 +2218,9 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 			goto fail;
 		}
 		memcpy(qs, &q->queue, sizeof(*qs));
+		qs->qname[sizeof(qs->qname) - 1] = '\0';
+		qs->parent[sizeof(qs->parent) - 1] = '\0';
+		qs->ifname[sizeof(qs->ifname) - 1] = '\0';
 		qs->qid = pf_qname2qid(qs->qname, 1);
 		if (qs->qid == 0) {
 			error = EBUSY;
@@ -4039,6 +4042,15 @@ pf_rule_copyin(struct pf_rule *from, struct pf_rule *to)
 		return (EINVAL);
 
 	/* XXX union skip[] */
+
+	from->label[sizeof(from->label) - 1] = '\0';
+	from->ifname[sizeof(from->ifname) - 1] = '\0';
+	from->rcv_ifname[sizeof(from->rcv_ifname) - 1] = '\0';
+	from->qname[sizeof(from->qname) - 1] = '\0';
+	from->pqname[sizeof(from->pqname) - 1] = '\0';
+	from->tagname[sizeof(from->tagname) - 1] = '\0';
+	from->match_tagname[sizeof(from->match_tagname) - 1] = '\0';
+	from->overload_tblname[sizeof(from->overload_tblname) - 1] = '\0';
 
 	strlcpy(to->label, from->label, sizeof(to->label));
 	strlcpy(to->ifname, from->ifname, sizeof(to->ifname));

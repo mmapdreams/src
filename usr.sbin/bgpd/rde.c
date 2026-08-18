@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.c,v 1.708 2026/07/01 09:53:47 claudio Exp $ */
+/*	$OpenBSD: rde.c,v 1.712 2026/07/30 13:56:06 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -464,15 +464,15 @@ rde_dispatch_imsg_session(struct imsgbuf *imsgbuf)
 	struct rde_aspath	*asp;
 	struct as_set		*aset;
 	struct rde_prefixset	*pset;
-	ssize_t			 n;
+	int			 n;
 	uint32_t		 peerid;
 	pid_t			 pid;
 	int			 verbose;
 	u_int			 aid;
 
 	while (imsgbuf) {
-		if ((n = imsg_get(imsgbuf, &imsg)) == -1)
-			fatal("rde_dispatch_imsg_session: imsg_get error");
+		if ((n = imsgbuf_get(imsgbuf, &imsg)) == -1)
+			fatal("rde_dispatch_imsg_session: imsgbuf_get error");
 		if (n == 0)
 			break;
 
@@ -850,13 +850,11 @@ badnetdel:
 			    -1, NULL, 0);
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
-			/* already checked by SE */
 			if (imsg_get_data(&imsg, &verbose, sizeof(verbose)) ==
-			    -1) {
+			    -1)
 				log_warnx("rde_dispatch: wrong imsg len");
-				break;
-			}
-			log_setverbose(verbose);
+			else
+				log_setverbose(verbose);
 			break;
 		case IMSG_CTL_END:
 			imsg_compose(ibuf_se_ctl, IMSG_CTL_END, 0, pid,
@@ -921,8 +919,8 @@ rde_dispatch_imsg_parent(struct imsgbuf *imsgbuf)
 	uint16_t		 rid;
 
 	while (imsgbuf) {
-		if ((n = imsg_get(imsgbuf, &imsg)) == -1)
-			fatal("rde_dispatch_imsg_parent: imsg_get error");
+		if ((n = imsgbuf_get(imsgbuf, &imsg)) == -1)
+			fatal("rde_dispatch_imsg_parent: imsgbuf_get error");
 		if (n == 0)
 			break;
 
@@ -1338,8 +1336,8 @@ rde_dispatch_imsg_rtr(struct imsgbuf *imsgbuf)
 	int			 n;
 
 	while (imsgbuf) {
-		if ((n = imsg_get(imsgbuf, &imsg)) == -1)
-			fatal("rde_dispatch_imsg_parent: imsg_get error");
+		if ((n = imsgbuf_get(imsgbuf, &imsg)) == -1)
+			fatal("rde_dispatch_imsg_parent: imsgbuf_get error");
 		if (n == 0)
 			break;
 
@@ -3671,7 +3669,7 @@ rde_up_flush_upcall(struct pt_entry *pte, struct adjout_prefix *p,
 {
 	struct rde_peer *peer = ptr;
 
-	adjout_prefix_withdraw(peer, pte, p);
+	adjout_prefix_withdraw(peer, pte, p, 0);
 }
 
 int

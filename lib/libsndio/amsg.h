@@ -1,4 +1,4 @@
-/*	$OpenBSD: amsg.h,v 1.19 2026/06/24 15:10:20 ratchov Exp $	*/
+/*	$OpenBSD: amsg.h,v 1.21 2026/08/12 10:58:19 ratchov Exp $	*/
 /*
  * Copyright (c) 2008 Alexandre Ratchov <alex@caoua.org>
  *
@@ -116,8 +116,8 @@ struct amsg {
 			uint16_t mode;		/* bitmap of MODE_XXX */
 #define AMSG_VERSION	7
 			uint8_t version;	/* protocol version */
-#define AMSG_NODEV	255
-			uint8_t devnum;		/* device number */
+#define AMSG_TYPE_MAGIC	0x40
+			uint8_t type;		/* AMSG_TYPE_MAGIC | type */
 			uint32_t id;		/* client id */
 #define AMSG_OPTMAX	12
 			char opt[AMSG_OPTMAX];	/* profile name */

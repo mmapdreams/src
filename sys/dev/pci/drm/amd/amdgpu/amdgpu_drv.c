@@ -2902,6 +2902,19 @@ static int amdgpu_pmops_runtime_suspend(struct device *dev)
 	return 0;
 }
 
+static void amdgpu_restore_umd_profile_pstate_after_runpm(struct amdgpu_device *adev)
+{
+	enum amd_dpm_forced_level level;
+	uint32_t profile_mode_mask = AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD |
+		AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK |
+		AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK |
+		AMD_DPM_FORCED_LEVEL_PROFILE_PEAK;
+
+	level = amdgpu_dpm_get_performance_level(adev);
+	if (level & profile_mode_mask)
+		amdgpu_asic_update_umd_stable_pstate(adev, true);
+}
+
 static int amdgpu_pmops_runtime_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
@@ -2946,6 +2959,8 @@ static int amdgpu_pmops_runtime_resume(struct device *dev)
 
 	if (adev->pm.rpm_mode == AMDGPU_RUNPM_PX)
 		drm_dev->switch_power_state = DRM_SWITCH_POWER_ON;
+
+	amdgpu_restore_umd_profile_pstate_after_runpm(adev);
 	adev->in_runpm = false;
 	return 0;
 }
@@ -2989,6 +3004,20 @@ static int amdgpu_drm_release(struct inode *inode, struct file *filp)
 	return drm_release(inode, filp);
 }
 #endif /* notyet */
+void
+amdgpu_file_close(struct drm_file *file_priv)
+{
+	struct amdgpu_fpriv *fpriv = file_priv->driver_priv;
+	struct drm_device *dev = file_priv->minor->dev;
+	int idx;
+
+	if (fpriv && drm_dev_enter(dev, &idx)) {
+		fpriv->evf_mgr.fd_closing = true;
+		amdgpu_eviction_fence_destroy(&fpriv->evf_mgr);
+		amdgpu_userq_mgr_fini(&fpriv->userq_mgr);
+		drm_dev_exit(idx);
+	}
+}
 
 #ifdef __linux__
 long amdgpu_drm_ioctl(struct file *filp,
@@ -3119,6 +3148,8 @@ static const struct drm_driver amdgpu_kms_driver = {
 	DRM_FBDEV_TTM_DRIVER_OPS,
 #ifdef __linux__
 	.fops = &amdgpu_driver_kms_fops,
+#else
+	.file_close = amdgpu_file_close,
 #endif
 	.release = &amdgpu_driver_release_kms,
 #ifdef CONFIG_PROC_FS
@@ -3147,6 +3178,8 @@ const struct drm_driver amdgpu_partition_driver = {
 	DRM_FBDEV_TTM_DRIVER_OPS,
 #ifdef __linux__
 	.fops = &amdgpu_driver_kms_fops,
+#else
+	.file_close = amdgpu_file_close,
 #endif
 	.release = &amdgpu_driver_release_kms,
 
@@ -3243,6 +3276,8 @@ MODULE_LICENSE("GPL and additional rights");
 
 #include <drm/drm_utils.h>
 #include <drm/drm_fb_helper.h>
+
+#include <linux/backlight.h>
 
 #include "vga.h"
 

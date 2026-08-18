@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.287 2026/07/01 11:09:12 job Exp $ */
+/*	$OpenBSD: extern.h,v 1.290 2026/07/15 07:53:06 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -29,11 +29,15 @@
 
 #define MAX_MSG_SIZE	(50 * 1024 * 1024)
 
-struct fqdnlistentry {
-	LIST_ENTRY(fqdnlistentry)	entry;
-	char				*fqdn;
+struct strlistentry {
+	LIST_ENTRY(strlistentry) entry;
+	char *str;
+	size_t str_len;
 };
-LIST_HEAD(fqdns, fqdnlistentry);
+LIST_HEAD(strlist, strlistentry);
+
+void strlist_insert(struct strlist *, const char *);
+int strlist_find(const struct strlist *, const char *, size_t);
 
 enum cert_as_type {
 	CERT_AS_ID, /* single identifier */
@@ -159,6 +163,7 @@ struct nca_hist {
 	char			*ski;
 	char			*location;
 	char			*mfturi;
+	char			*baseuri;
 	char			*notify;
 	time_t			 since;
 	time_t			 last_attempt;
@@ -1040,7 +1045,7 @@ extern int	 outformats;
 #define FORMAT_OMETRIC	0x10
 #define FORMAT_CCR	0x20
 
-int		 outputfiles(struct validation_data *, struct stats *);
+int		 outputfiles(struct validation_data *, struct stats *, int);
 int		 outputheader(FILE *, struct validation_data *, struct stats *);
 int		 output_bgpd(FILE *, struct validation_data *, struct stats *);
 int		 output_bird(FILE *, struct validation_data *, struct stats *);

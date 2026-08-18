@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.h,v 1.356 2026/07/02 07:40:12 claudio Exp $ */
+/*	$OpenBSD: rde.h,v 1.359 2026/07/20 13:25:49 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org> and
@@ -321,6 +321,12 @@ struct prefix {
 #define	NEXTHOP_MASK		0x0f
 #define	NEXTHOP_VALID		0x80
 
+struct pq_entry {
+	TAILQ_ENTRY(pq_entry)	 entry;
+	struct prefix		*p;	/* NULL for withdraws */
+	uint32_t		 path_id_tx;
+};
+
 struct adjout_attr {
 	uint64_t		 hash;
 	struct rde_aspath	*aspath;
@@ -359,6 +365,7 @@ struct filterstate {
 
 enum eval_mode {
 	EVAL_NONE,
+	EVAL_SYNC,
 	EVAL_REEVAL,
 	EVAL_DEFAULT,
 	EVAL_ALL,
@@ -777,7 +784,7 @@ struct adjout_prefix	*adjout_prefix_next(struct pt_entry *, uint32_t,
 void		 adjout_prefix_update(struct adjout_prefix *, struct rde_peer *,
 		    struct filterstate *, struct pt_entry *, uint32_t, int);
 void		 adjout_prefix_withdraw(struct rde_peer *, struct pt_entry *,
-		    struct adjout_prefix *);
+		    struct adjout_prefix *, int);
 void		 adjout_prefix_reaper(struct rde_peer *);
 void		 adjout_prefix_dump_cleanup(struct rib_context *);
 void		 adjout_prefix_dump_r(struct rib_context *);
@@ -791,6 +798,7 @@ int		 adjout_prefix_dump_subtree(struct rde_peer *,
 		    void (*)(struct pt_entry *, struct adjout_prefix *,
 		    uint32_t, void *),
 		    void (*)(void *, uint8_t), int (*)(void *));
+void		 adjout_prefix_collect(struct pt_entry *);
 void		 adjout_peer_init(struct rde_peer *);
 void		 adjout_peer_flush_pending(struct rde_peer *);
 void		 adjout_peer_free(struct rde_peer *);
@@ -807,9 +815,12 @@ void		 pend_prefix_stats(struct ch_stats *);
 void		 adjout_attr_stats(struct ch_stats *);
 
 /* rde_update.c */
-void	 up_generate_updates(struct rde_peer *, struct rib_entry *, int);
-void	 up_generate_addpath(struct rde_peer *, struct rib_entry *, int);
-void	 up_generate_addpath_all(struct rde_peer *, struct rib_entry *, int);
+void	 up_generate_updates(struct rde_peer *, struct rib_entry *,
+	    enum eval_mode);
+void	 up_generate_addpath(struct rde_peer *, struct rib_entry *,
+	    enum eval_mode);
+void	 up_generate_addpath_all(struct rde_peer *, struct rib_entry *,
+	    enum eval_mode);
 void	 up_generate_default(struct rde_peer *, uint8_t);
 int	 up_is_eor(struct rde_peer *, uint8_t);
 void	 up_dump_withdraws(struct imsgbuf *, struct rde_peer *, uint8_t);

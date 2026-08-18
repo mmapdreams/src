@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.68 2026/06/14 08:53:06 rsadowski Exp $	*/
+/*	$OpenBSD: control.c,v 1.74 2026/08/12 19:24:02 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -153,6 +153,7 @@ control_accept(int listenfd, short event, void *arg)
 
 			event_del(&cs->cs_ev);
 			evtimer_add(&cs->cs_evt, &evtpause);
+			log_warn("%s: deferring connections", __func__);
 		} else if (errno != EWOULDBLOCK && errno != EINTR &&
 		    errno != ECONNABORTED)
 			log_warn("%s: accept", __func__);
@@ -256,7 +257,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(&c->iev.ibuf, &imsg)) == -1) {
+		if ((n = imsgbuf_get(&c->iev.ibuf, &imsg)) == -1) {
 			control_close(fd, cs);
 			return;
 		}
@@ -265,7 +266,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			break;
 
 		if (c->waiting) {
-			log_debug("%s: unexpected imsg %d",
+			log_warn("%s: unexpected imsg %d",
 			    __func__, imsg_get_type(&imsg));
 			imsg_free(&imsg);
 			control_close(fd, cs);
@@ -283,78 +284,102 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			if (imsg_get_data(&imsg, &id, sizeof(id)) == -1)
 				fatalx("%s: imsg_get_data", __func__);
 
-			if (disable_rdr(c, &id))
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
-			else {
+			if (disable_rdr(c, &id)) {
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
+			} else {
 				control_imsg_forward(&imsg);
-				imsg_compose_event(&c->iev, IMSG_CTL_OK,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 			}
 			break;
 		case IMSG_CTL_RDR_ENABLE:
 			if (imsg_get_data(&imsg, &id, sizeof(id)) == -1)
 				fatalx("%s: imsg_get_data", __func__);
 
-			if (enable_rdr(c, &id))
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
-			else {
+			if (enable_rdr(c, &id)) {
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
+			} else {
 				control_imsg_forward(&imsg);
-				imsg_compose_event(&c->iev, IMSG_CTL_OK,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 			}
 			break;
 		case IMSG_CTL_TABLE_DISABLE:
 			if (imsg_get_data(&imsg, &id, sizeof(id)) == -1)
 				fatalx("%s: imsg_get_data", __func__);
 
-			if (disable_table(c, &id))
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
-			else {
+			if (disable_table(c, &id)) {
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
+			} else {
 				control_imsg_forward(&imsg);
-				imsg_compose_event(&c->iev, IMSG_CTL_OK,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 			}
 			break;
 		case IMSG_CTL_TABLE_ENABLE:
 			if (imsg_get_data(&imsg, &id, sizeof(id)) == -1)
 				fatalx("%s: imsg_get_data", __func__);
 
-			if (enable_table(c, &id))
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
-			else {
+			if (enable_table(c, &id)) {
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
+			} else {
 				control_imsg_forward(&imsg);
-				imsg_compose_event(&c->iev, IMSG_CTL_OK,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 			}
 			break;
 		case IMSG_CTL_HOST_DISABLE:
 			if (imsg_get_data(&imsg, &id, sizeof(id)) == -1)
 				fatalx("%s: imsg_get_data", __func__);
 
-			if (disable_host(c, &id, NULL))
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
-			else {
+			if (disable_host(c, &id, NULL)) {
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
+			} else {
 				control_imsg_forward(&imsg);
-				imsg_compose_event(&c->iev, IMSG_CTL_OK,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 			}
 			break;
 		case IMSG_CTL_HOST_ENABLE:
 			if (imsg_get_data(&imsg, &id, sizeof(id)) == -1)
 				fatalx("%s: imsg_get_data", __func__);
 
-			if (enable_host(c, &id, NULL))
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
-			else {
+			if (enable_host(c, &id, NULL)) {
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
+			} else {
 				control_imsg_forward(&imsg);
-				imsg_compose_event(&c->iev, IMSG_CTL_OK,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 			}
 			break;
 		case IMSG_CTL_SHUTDOWN:
@@ -362,18 +387,22 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			proc_forward_imsg(env->sc_ps, &imsg, PROC_PARENT);
 			break;
 		case IMSG_CTL_POLL:
-			proc_compose(env->sc_ps, PROC_HCE,
-			    IMSG_CTL_POLL, NULL, 0);
-			imsg_compose_event(&c->iev, IMSG_CTL_OK,
-			    0, ps->ps_instance + 1, -1, NULL, 0);
+			if (proc_compose(env->sc_ps, PROC_HCE, IMSG_CTL_POLL,
+			    NULL, 0) == -1)
+				log_warn("%s: proc_compose", __func__);
+			if (imsg_compose_event(&c->iev, IMSG_CTL_OK,
+			    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+				log_warn("%s: imsg_compose_event", __func__);
 			break;
 		case IMSG_CTL_NOTIFY:
 			if (c->flags & CTL_CONN_NOTIFY) {
 				log_debug("%s: "
 				    "client requested notify more than once",
 				    __func__);
-				imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
-				    0, ps->ps_instance + 1, -1, NULL, 0);
+				if (imsg_compose_event(&c->iev, IMSG_CTL_FAIL,
+				    0, ps->ps_instance + 1, -1, NULL, 0) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 				break;
 			}
 			c->flags |= CTL_CONN_NOTIFY;
@@ -398,6 +427,21 @@ control_dispatch_imsg(int fd, short event, void *arg)
 	}
 
 	imsg_event_add(&c->iev);
+}
+
+void
+control_imsg_notify(uint32_t type, void *data, uint16_t len)
+{
+	struct ctl_conn *c;
+
+	TAILQ_FOREACH(c, &ctl_conns, entry) {
+		if (c->flags & CTL_CONN_NOTIFY) {
+			if (imsg_compose(&c->iev.ibuf, type, 0, 0, -1, data,
+			    len) == -1)
+				fatal("%s: imsg_compose", __func__);
+			imsg_event_add(&c->iev);
+		}
+	}
 }
 
 void

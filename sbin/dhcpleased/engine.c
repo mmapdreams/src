@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.65 2026/06/15 17:07:34 florian Exp $	*/
+/*	$OpenBSD: engine.c,v 1.68 2026/08/14 15:57:30 florian Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -287,8 +287,7 @@ engine_dispatch_frontend(int fd, short event, void *bula)
 	struct imsgbuf			*ibuf = &iev->ibuf;
 	struct imsg			 imsg;
 	struct dhcpleased_iface		*iface;
-	ssize_t				 n;
-	int				 shut = 0;
+	int				 n, shut = 0;
 #ifndef	SMALL
 	int				 verbose;
 #endif	/* SMALL */
@@ -310,8 +309,8 @@ engine_dispatch_frontend(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get error", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get error", __func__);
 		if (n == 0)	/* No more messages. */
 			break;
 
@@ -410,9 +409,8 @@ engine_dispatch_main(int fd, short event, void *bula)
 	struct imsgev			*iev = bula;
 	struct imsgbuf			*ibuf = &iev->ibuf;
 	struct imsg_ifinfo		 imsg_ifinfo;
-	ssize_t				 n;
 	uint32_t			 type;
-	int				 shut = 0;
+	int				 n, shut = 0;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -430,8 +428,8 @@ engine_dispatch_main(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get error", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get error", __func__);
 		if (n == 0)	/* No more messages. */
 			break;
 
@@ -1042,13 +1040,16 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 			memcpy(&nameservers, p, MINIMUM(sizeof(nameservers),
 			    dho_len));
 			if (log_getverbose() > 1) {
-				for (i = 0; i < MINIMUM(sizeof(nameservers),
-				    dho_len / sizeof(nameservers[0])); i++) {
+				size_t num_lease_nameservers = dho_len /
+				    sizeof(nameservers[0]);
+
+				for (i = 0; i < MINIMUM(MAX_RDNS_COUNT,
+				    num_lease_nameservers); i++) {
 					log_debug("DHO_DOMAIN_NAME_SERVERS: %s "
 					    "(%lu/%lu)", inet_ntop(AF_INET,
 					    &nameservers[i], hbuf,
 					    sizeof(hbuf)), i + 1,
-					    dho_len / sizeof(nameservers[0]));
+					    num_lease_nameservers);
 				}
 			}
 			p += dho_len;

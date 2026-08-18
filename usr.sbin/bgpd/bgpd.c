@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.c,v 1.290 2026/05/14 12:26:44 claudio Exp $ */
+/*	$OpenBSD: bgpd.c,v 1.293 2026/07/30 13:56:06 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -847,15 +847,14 @@ dispatch_imsg(struct imsgbuf *imsgbuf, int idx, struct bgpd_config *conf)
 	struct pftable_msg	 pfmsg;
 	struct demote_msg	 demote;
 	char			 reason[REASON_LEN], ifname[IFNAMSIZ];
-	ssize_t			 n;
+	int			 n;
 	u_int			 rtableid;
 	int			 rv, verbose;
 
 	rv = 0;
 	while (imsgbuf) {
-		if ((n = imsg_get(imsgbuf, &imsg)) == -1)
+		if ((n = imsgbuf_get(imsgbuf, &imsg)) == -1)
 			return (-1);
-
 		if (n == 0)
 			break;
 
@@ -1002,7 +1001,6 @@ dispatch_imsg(struct imsgbuf *imsgbuf, int idx, struct bgpd_config *conf)
 			}
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
-			/* already checked by SE */
 			if (imsg_get_data(&imsg, &verbose, sizeof(verbose)) ==
 			    -1)
 				log_warn("wrong imsg len");
@@ -1258,7 +1256,7 @@ set_pollfd(struct pollfd *pfd, struct imsgbuf *i)
 int
 handle_pollfd(struct pollfd *pfd, struct imsgbuf *i)
 {
-	ssize_t n;
+	int n;
 
 	if (i == NULL)
 		return (0);

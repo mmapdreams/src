@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysv_sem.c,v 1.69 2026/05/22 23:10:05 mvs Exp $	*/
+/*	$OpenBSD: sysv_sem.c,v 1.71 2026/07/13 15:17:47 cludwig Exp $	*/
 /*	$NetBSD: sysv_sem.c,v 1.26 1996/02/09 19:00:25 christos Exp $	*/
 
 /*
@@ -46,6 +46,8 @@
 #endif
 
 #define SEMOP_MAX (MALLOC_MAX / sizeof(struct sembuf))
+
+struct	rwlock sysvsem_lock = RWLOCK_INITIALIZER("semlk");
 
 int	semtot = 0;
 int	semutot = 0;
@@ -291,7 +293,7 @@ again:
 		sema[ix] = NULL;
 		sem_rele(semaptr);
 		semundo_clear(ix, -1);
-		wakeup(&sema[ix]);
+		wakeup(semaptr);
 		break;
 
 	case IPC_SET:
@@ -384,7 +386,7 @@ again:
 			return (ERANGE);
 		semaptr->sem_base[semnum].semval = arg.val;
 		semundo_clear(ix, semnum);
-		wakeup(&sema[ix]);
+		wakeup(semaptr);
 		break;
 
 	case SETALL:
@@ -418,7 +420,7 @@ again:
 		for (i = 0; i < nsems; i++)
 			semaptr->sem_base[i].semval = semval[i];
 		semundo_clear(ix, -1);
-		wakeup(&sema[ix]);
+		wakeup(semaptr);
 		break;
 
 	default:
@@ -710,7 +712,7 @@ skipcopy:
 		sem_ref(semaptr);
 
 		DPRINTF(("semop:  good night!\n"));
-		error = tsleep_nsec(&sema[semid], PLOCK | PCATCH,
+		error = tsleep_nsec(semaptr, PLOCK | PCATCH,
 		    "semwait", INFSLP);
 		DPRINTF(("semop:  good morning (error=%d)!\n", error));
 
@@ -814,7 +816,7 @@ done:
 	/* Do a wakeup if any semaphore was up'd. */
 	if (do_wakeup) {
 		DPRINTF(("semop:  doing wakeup\n"));
-		wakeup(&sema[semid]);
+		wakeup(semaptr);
 		DPRINTF(("semop:  back from wakeup\n"));
 	}
 	DPRINTF(("semop:  done\n"));
@@ -888,7 +890,7 @@ semexit(struct process *pr)
 			else
 				semaptr->sem_base[semnum].semval += adjval;
 
-			wakeup(&sema[semid]);
+			wakeup(semaptr);
 			DPRINTF(("semexit:  back from wakeup\n"));
 		}
 	}
@@ -935,13 +937,10 @@ const struct sysctl_bounded_args sysvsem_vars[] = {
  * Userland access to struct seminfo.
  */
 int
-sysctl_sysvsem(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+sysctl_sysvsem_locked(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	void *newp, size_t newlen)
 {
 	int error, val;
-
-	if (namelen != 1)
-                        return (ENOTDIR);       /* leaf-only */
 
 	switch (name[0]) {
 	case KERN_SEMINFO_SEMMNI:
@@ -970,4 +969,23 @@ sysctl_sysvsem(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		    name, namelen, oldp, oldlenp, newp, newlen));
 	}
 	/* NOTREACHED */
+}
+
+int
+sysctl_sysvsem(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+	void *newp, size_t newlen)
+{
+	int error;
+
+	if (namelen != 1)
+		return (ENOTDIR);       /* leaf-only */
+
+	rw_enter_write(&sysvsem_lock);
+	KERNEL_LOCK();
+	error = sysctl_sysvsem_locked(name, namelen, oldp, oldlenp,
+	    newp, newlen);
+	KERNEL_UNLOCK();
+	rw_exit_write(&sysvsem_lock);
+
+	return (error);
 }

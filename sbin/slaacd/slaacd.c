@@ -1,4 +1,4 @@
-/*	$OpenBSD: slaacd.c,v 1.82 2025/10/15 11:25:45 florian Exp $	*/
+/*	$OpenBSD: slaacd.c,v 1.84 2026/08/04 12:48:01 claudio Exp $	*/
 
 /*
  * Copyright (c) 2017 Florian Obser <florian@openbsd.org>
@@ -390,9 +390,8 @@ main_dispatch_frontend(int fd, short event, void *bula)
 	struct imsgbuf		*ibuf;
 	struct imsg		 imsg;
 	struct imsg_ifinfo	 imsg_ifinfo;
-	ssize_t			 n;
 	uint32_t		 type;
-	int			 shut = 0;
+	int			 n, shut = 0;
 	int			 rdomain;
 #ifndef	SMALL
 	int			 verbose;
@@ -416,8 +415,8 @@ main_dispatch_frontend(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("imsg_get");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("imsgbuf_get");
 		if (n == 0)	/* No more messages. */
 			break;
 
@@ -474,9 +473,8 @@ main_dispatch_engine(int fd, short event, void *bula)
 	struct imsg_configure_address	 address;
 	struct imsg_configure_dfr	 dfr;
 	struct imsg_propose_rdns	 rdns;
-	ssize_t				 n;
 	uint32_t			 type;
-	int				 shut = 0;
+	int				 n, shut = 0;
 
 	ibuf = &iev->ibuf;
 
@@ -496,8 +494,8 @@ main_dispatch_engine(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("imsg_get");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("imsgbuf_get");
 		if (n == 0)	/* No more messages. */
 			break;
 

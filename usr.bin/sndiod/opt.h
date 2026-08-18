@@ -1,4 +1,4 @@
-/*	$OpenBSD: opt.h,v 1.12 2026/05/20 13:02:04 ratchov Exp $	*/
+/*	$OpenBSD: opt.h,v 1.16 2026/08/12 11:03:19 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -17,14 +17,12 @@
 #ifndef OPT_H
 #define OPT_H
 
-#define OPT_NMAX		16
 #define OPT_NAPP		8
 
 struct dev;
 
 struct app {
-#define APP_NAMEMAX	12
-	char name[APP_NAMEMAX];		/* name matching [a-z]+ */
+	char name[CTL_NAMEMAX];		/* name matching [a-z]+ */
 	unsigned int serial;		/* global unique number */
 	int vol;
 };
@@ -39,14 +37,13 @@ struct opt {
 	struct dev *dev;
 	struct opt_alt *alt_list;
 	struct midi *midi;
+	struct midithru *midithru;
 	struct mtc *mtc;	/* if set, MMC-controlled MTC source */
 
 	struct app app_array[OPT_NAPP];
 	unsigned int app_serial;
 
-	int num;
-#define OPT_NAMEMAX 11
-	char name[OPT_NAMEMAX + 1];
+	char name[CTL_NAMEMAX];
 	int maxweight;		/* max dynamic range for clients */
 	int pmin, pmax;		/* play channels */
 	int rmin, rmax;		/* recording channels */
@@ -74,7 +71,6 @@ struct opt *opt_new(struct dev *, char *, int, int, int, int,
 void opt_del(struct opt *);
 void opt_setalt(struct opt *, struct dev *);
 struct opt *opt_byname(char *);
-struct opt *opt_bynum(int);
 void opt_init(struct opt *);
 void opt_done(struct opt *);
 void opt_setmode(struct opt *, int, int);

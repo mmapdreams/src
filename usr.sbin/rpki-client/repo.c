@@ -1,4 +1,4 @@
-/*	$OpenBSD: repo.c,v 1.88 2026/07/01 11:09:12 job Exp $ */
+/*	$OpenBSD: repo.c,v 1.91 2026/07/28 18:58:22 claudio Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -62,6 +62,7 @@ struct rrdprepo {
 	struct filepath_tree	 deleted;
 	unsigned int		 id;
 	enum repo_state		 state;
+	int			 file_failed;
 	time_t			 last_reset;
 	time_t			 mtime;
 };
@@ -203,7 +204,7 @@ static void
 filepath_put(struct filepath_tree *tree, struct filepath *fp)
 {
 	RB_REMOVE(filepath_tree, tree, fp);
-	free((void *)fp->file);
+	free(fp->file);
 	free(fp);
 }
 
@@ -952,7 +953,7 @@ rrdp_clear(unsigned int id)
 
 	/* remove rrdp repository contents */
 	remove_contents(rr->basedir);
-	rr->state = REPO_LOADING;
+	rr->file_failed = 0;
 }
 
 /*
@@ -975,7 +976,7 @@ rrdp_handle_file(unsigned int id, enum publish_type pt, char *uri,
 	rr = rrdp_find(id);
 	if (rr == NULL)
 		errx(1, "non-existent rrdp repo %u", id);
-	if (rr->state == REPO_FAILED)
+	if (rr->file_failed)
 		return -1;
 
 	/* check hash of original file for updates and deletes */
@@ -1045,7 +1046,7 @@ rrdp_handle_file(unsigned int id, enum publish_type pt, char *uri,
 	return 1;
 
 fail:
-	rr->state = REPO_FAILED;
+	rr->file_failed = 1;
 	if (fd != -1)
 		close(fd);
 	free(fn);
@@ -1118,7 +1119,7 @@ rrdp_finish(unsigned int id, int ok)
 	if (rr->state != REPO_LOADING)
 		return;
 
-	if (ok) {
+	if (ok && !rr->file_failed) {
 		logx("%s: loaded from network", rr->notifyuri);
 		if (time(NULL) - rr->mtime > 24 * 60 * 60) {
 			warnx("%s: notification file not modified since %s",
@@ -1816,21 +1817,25 @@ repo_move_valid(struct filepath_tree *tree)
 		if ((fp->file = strdup(fn)) == NULL)
 			err(1, NULL);
 
- again:
 		if ((ofp = RB_INSERT(filepath_tree, tree, fp)) != NULL) {
-			if (ofp->talmask == 0) {
-				/* conflicting path is not valid, drop it */
-				filepath_put(tree, ofp);
-				goto again;
+			if (ofp->talmask != 0) {
+				/* conflicting filepath is valid, keep it */
+				if (fp->talmask != 0) {
+					warnx("%s: file already present in "
+					    "validated cache", fp->file);
+				}
+				free(fp->file);
+				free(fp);
+				free(base);
+				continue;
 			}
-			if (fp->talmask != 0) {
-				warnx("%s: file already present in "
-				    "validated cache", fp->file);
-			}
+
+			/* conflicting filepath is not valid, replace it */
+			ofp->talmask = fp->talmask;
+			ofp->mtime = fp->mtime;
 			free(fp->file);
 			free(fp);
-			free(base);
-			continue;
+			fp = ofp;
 		}
 
 		if (rename(base, fp->file) == -1)

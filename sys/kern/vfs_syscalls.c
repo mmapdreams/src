@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_syscalls.c,v 1.385 2026/06/02 21:46:21 deraadt Exp $	*/
+/*	$OpenBSD: vfs_syscalls.c,v 1.388 2026/08/15 22:07:04 gnezdo Exp $	*/
 /*	$NetBSD: vfs_syscalls.c,v 1.71 1996/04/23 10:29:02 mycroft Exp $	*/
 
 /*
@@ -182,6 +182,7 @@ sys_mount(struct proc *p, void *v, register_t *retval)
 	}
 	if (vp->v_type != VDIR) {
 		vput(vp);
+		error = ENOTDIR;
 		goto fail;
 	}
 	error = copyinstr(SCARG(uap, type), fstypename, MFSNAMELEN, NULL);
@@ -551,7 +552,7 @@ sys_quotactl(struct proc *p, void *v, register_t *retval)
 		syscallarg(const char *) path;
 		syscallarg(int) cmd;
 		syscallarg(int) uid;
-		syscallarg(char *) arg;
+		syscallarg(void *) arg;
 	} */ *uap = v;
 	struct mount *mp;
 	int error;
@@ -2251,7 +2252,7 @@ dovchflags(struct proc *p, struct vnode *vp, u_int flags)
 	int error;
 
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_mount && vp->v_mount->mnt_flag & MNT_RDONLY)
+	if (vp->v_mount && (vp->v_mount->mnt_flag & MNT_RDONLY))
 		error = EROFS;
 	else if (flags == VNOVAL)
 		error = EINVAL;
@@ -2325,7 +2326,7 @@ dofchmodat(struct proc *p, int fd, const char *path, mode_t mode, int flag)
 		return (error);
 	vp = nd.ni_vp;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_mount->mnt_flag & MNT_RDONLY)
+	if (vp->v_mount && (vp->v_mount->mnt_flag & MNT_RDONLY))
 		error = EROFS;
 	else {
 		vattr_null(&vattr);
@@ -2361,7 +2362,7 @@ sys_fchmod(struct proc *p, void *v, register_t *retval)
 		return (error);
 	vp = fp->f_data;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_mount && vp->v_mount->mnt_flag & MNT_RDONLY)
+	if (vp->v_mount && (vp->v_mount->mnt_flag & MNT_RDONLY))
 		error = EROFS;
 	else if (p->p_fd->fd_ofileflags[SCARG(uap, fd)] & UF_PLEDGEOPEN)
 		error = EPERM;
@@ -2427,7 +2428,7 @@ dofchownat(struct proc *p, int fd, const char *path, uid_t uid, gid_t gid,
 		return (error);
 	vp = nd.ni_vp;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_mount->mnt_flag & MNT_RDONLY)
+	if (vp->v_mount && (vp->v_mount->mnt_flag & MNT_RDONLY))
 		error = EROFS;
 	else {
 		if ((error = pledge_chown(p, uid, gid)))
@@ -2478,7 +2479,7 @@ sys_lchown(struct proc *p, void *v, register_t *retval)
 		return (error);
 	vp = nd.ni_vp;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_mount->mnt_flag & MNT_RDONLY)
+	if (vp->v_mount && (vp->v_mount->mnt_flag & MNT_RDONLY))
 		error = EROFS;
 	else {
 		if ((error = pledge_chown(p, uid, gid)))
@@ -2687,7 +2688,7 @@ dovutimens(struct proc *p, struct vnode *vp, struct timespec ts[2])
 		vattr.va_mtime = ts[1];
 
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_mount->mnt_flag & MNT_RDONLY)
+	if (vp->v_mount && (vp->v_mount->mnt_flag & MNT_RDONLY))
 		error = EROFS;
 	else
 		error = VOP_SETATTR(vp, &vattr, p->p_ucred, p);

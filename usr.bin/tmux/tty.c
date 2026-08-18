@@ -1,4 +1,4 @@
-/* $OpenBSD: tty.c,v 1.476 2026/06/26 11:36:22 nicm Exp $ */
+/* $OpenBSD: tty.c,v 1.478 2026/08/17 14:47:41 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -272,7 +272,7 @@ tty_open(struct tty *tty, char **cause)
 	struct client	*c = tty->client;
 
 	tty->term = tty_term_create(tty, c->term_name, c->term_caps,
-	    c->term_ncaps, &c->term_features, cause);
+	    c->term_ncaps, cause);
 	if (tty->term == NULL) {
 		tty_close(tty);
 		return (-1);
@@ -531,7 +531,7 @@ tty_update_features(struct tty *tty)
 {
 	struct client	*c = tty->client;
 
-	if (tty_apply_features(tty->term, c->term_features))
+	if (tty_apply_features(tty->term))
 		tty_term_apply_overrides(tty->term);
 
 	if (tty_use_margin(tty))
@@ -955,7 +955,7 @@ tty_window_offset1(struct tty *tty, u_int *ox, u_int *oy, u_int *sx, u_int *sy)
 {
 	struct client		*c = tty->client;
 	struct window		*w = c->session->curw->window;
-	struct window_pane	*wp = server_client_get_pane(c);
+	struct window_pane	*wp = w->active;
 	u_int			 cx, cy, lines;
 
 	lines = status_line_size(c);

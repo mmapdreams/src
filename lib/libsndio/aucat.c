@@ -1,4 +1,4 @@
-/*	$OpenBSD: aucat.c,v 1.83 2026/06/24 15:10:20 ratchov Exp $	*/
+/*	$OpenBSD: aucat.c,v 1.85 2026/08/12 10:58:19 ratchov Exp $	*/
 /*
  * Copyright (c) 2008 Alexandre Ratchov <alex@caoua.org>
  *
@@ -395,7 +395,7 @@ _aucat_open(struct aucat *hdl, const char *str, unsigned int mode)
 	int eof;
 	char host[NI_MAXHOST], opt[AMSG_OPTMAX];
 	const char *p;
-	unsigned int unit, devnum, type;
+	unsigned int unit, type;
 
 	if ((p = _sndio_parsetype(str, "snd")) != NULL)
 		type = AMSG_TYPE_SND;
@@ -424,36 +424,14 @@ _aucat_open(struct aucat *hdl, const char *str, unsigned int mode)
 		return 0;
 	}
 	p++;
-	if (type == AMSG_TYPE_SND) {
-		if (*p < '0' || *p > '9') {
-			devnum = AMSG_NODEV;
-			p = parsestr(p, opt, AMSG_OPTMAX);
-			if (p == NULL)
-				return 0;
-		} else {
-			p = _sndio_parsenum(p, &devnum, 15);
-			if (p == NULL)
-				return 0;
-			if (*p == '.') {
-				p = parsestr(++p, opt, AMSG_OPTMAX);
-				if (p == NULL)
-					return 0;
-			} else
-				strlcpy(opt, "default", AMSG_OPTMAX);
-		}
-	} else {
-		p = _sndio_parsenum(p, &devnum, 15);
-		if (p == NULL)
-			return 0;
-		memset(opt, 0, sizeof(opt));
-	}
+	p = parsestr(p, opt, AMSG_OPTMAX);
+	if (p == NULL)
+		return 0;
 	if (*p != '\0') {
 		DPRINTF("%s: junk at end of dev name\n", p);
 		return 0;
 	}
-	devnum += type * 16; /* XXX */
-	DPRINTFN(2, "_aucat_open: host=%s unit=%u devnum=%u opt=%s\n",
-	    host, unit, devnum, opt);
+	DPRINTFN(2, "_aucat_open: host=%s unit=%u opt=%s\n", host, unit, opt);
 	if (host[0] != '\0') {
 		if (!aucat_connect_tcp(hdl, host, unit))
 			return 0;
@@ -481,7 +459,7 @@ _aucat_open(struct aucat *hdl, const char *str, unsigned int mode)
 	hdl->wmsg.cmd = htonl(AMSG_HELLO);
 	hdl->wmsg.u.hello.version = AMSG_VERSION;
 	hdl->wmsg.u.hello.mode = htons(mode);
-	hdl->wmsg.u.hello.devnum = devnum;
+	hdl->wmsg.u.hello.type = AMSG_TYPE_MAGIC | type;
 	hdl->wmsg.u.hello.id = htonl(getpid());
 	strlcpy(hdl->wmsg.u.hello.who, __progname,
 	    sizeof(hdl->wmsg.u.hello.who));

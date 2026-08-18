@@ -1,4 +1,4 @@
-/* $OpenBSD: window-client.c,v 1.45 2026/06/26 08:19:44 nicm Exp $ */
+/* $OpenBSD: window-client.c,v 1.48 2026/08/05 08:54:56 nicm Exp $ */
 
 /*
  * Copyright (c) 2017 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -26,7 +26,8 @@
 #include "tmux.h"
 
 static struct screen	*window_client_init(struct window_mode_entry *,
-			     struct cmd_find_state *, struct args *);
+			     struct cmdq_item *, struct cmd_find_state *,
+			     struct args *);
 static void		 window_client_free(struct window_mode_entry *);
 static void		 window_client_resize(struct window_mode_entry *, u_int,
 			     u_int);
@@ -112,14 +113,16 @@ static const char *window_client_info_lines[] = {
 	"#{?#{I/c:kmous},,#[align=right]unavailable: [kmous] missing}",
 
 	"#[fg=themelightgrey]set-clipboard #[#{E:tree-mode-border-style},acs]x#[default] "
-	"#{?#{!=:#{set-clipboard},off},#{?#{I/f:clipboard},,"
+	"#{?#{!=:#{set-clipboard},off},#{?#{I/c:Ms},,"
 	"#[fg=themered]}#{set-clipboard},#[fg=themelightgrey]off} "
-	"#{?#{I/f:clipboard},,#[align=right]unavailable: [Ms] missing}",
+	"#{?#{I/c:Ms},,#[align=right]unavailable: [Ms] "
+	"#{?clipboard_invalid,invalid,missing}}",
 
 	"#[fg=themelightgrey]get-clipboard #[#{E:tree-mode-border-style},acs]x#[default] "
-	"#{?#{!=:#{get-clipboard},off},#{?#{I/f:clipboard},,"
+	"#{?#{!=:#{get-clipboard},off},#{?#{I/c:Ms},,"
 	"#[fg=themered]}#{get-clipboard},#[fg=themelightgrey]off} "
-	"#{?#{I/f:clipboard},,#[align=right]unavailable: [Ms] missing}",
+	"#{?#{I/c:Ms},,#[align=right]unavailable: [Ms] "
+	"#{?clipboard_invalid,invalid,missing}}",
 
 	"#[fg=themelightgrey]focus-events  #[#{E:tree-mode-border-style},acs]x#[default] "
 	"#{?focus-events,#{?#{I/f:focus},,#[fg=themered]}on,#[fg=themelightgrey]off} "
@@ -164,6 +167,7 @@ const struct window_mode window_client_mode = {
 
 struct window_client_itemdata {
 	struct client	*c;
+	char		*ttyname;
 };
 
 struct window_client_modedata {
@@ -204,6 +208,7 @@ static void
 window_client_free_item(struct window_client_itemdata *item)
 {
 	server_client_unref(item->c);
+	free(item->ttyname);
 	free(item);
 }
 
@@ -231,6 +236,7 @@ window_client_build(void *modedata, struct sort_criteria *sort_crit,
 
 		item = window_client_add_item(data);
 		item->c = l[i];
+		item->ttyname = xstrdup(l[i]->ttyname);
 
 		l[i]->references++;
 	}
@@ -269,6 +275,10 @@ window_client_draw_info(__unused void *modedata, void *itemdata,
 	char				*expanded;
 
 	ft = format_create_defaults(NULL, c, NULL, NULL, NULL);
+	if (c->tty.term->flags & TERM_INVALIDMS)
+		format_add(ft, "clipboard_invalid", "1");
+	else
+		format_add(ft, "clipboard_invalid", "0");
 
 	screen_write_cursormove(ctx, cx, cy, 0);
 	for (i = 0; i < nitems(window_client_info_lines); i++) {
@@ -418,7 +428,8 @@ window_client_help(u_int *width, const char **item)
 
 static struct screen *
 window_client_init(struct window_mode_entry *wme,
-    __unused struct cmd_find_state *fs, struct args *args)
+    __unused struct cmdq_item *item, __unused struct cmd_find_state *fs,
+    struct args *args)
 {
 	struct window_pane		*wp = wme->wp;
 	struct window_client_modedata	*data;
@@ -552,7 +563,7 @@ window_client_key(struct window_mode_entry *wme, struct client *c,
 		break;
 	case '\r':
 		item = mode_tree_get_current(mtd);
-		mode_tree_run_command(c, NULL, data->command, item->c->ttyname);
+		mode_tree_run_command(c, NULL, data->command, item->ttyname);
 		finished = 1;
 		break;
 	}

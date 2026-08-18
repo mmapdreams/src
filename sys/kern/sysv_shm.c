@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysv_shm.c,v 1.85 2026/06/24 11:25:23 deraadt Exp $	*/
+/*	$OpenBSD: sysv_shm.c,v 1.88 2026/08/12 00:52:40 mvs Exp $	*/
 /*	$NetBSD: sysv_shm.c,v 1.50 1998/10/21 22:24:29 tron Exp $	*/
 
 /*
@@ -65,6 +65,8 @@
 #include <sys/syscallargs.h>
 
 #include <uvm/uvm_extern.h>
+
+struct rwlock sysvshm_lock = RWLOCK_INITIALIZER("shmlk");
 
 extern struct shminfo shminfo;
 struct shmid_ds **shmsegs;	/* linear mapping of shmid -> shmseg */
@@ -162,25 +164,23 @@ int
 shm_delete_mapping(struct vmspace *vm, struct shmmap_state *shmmap_s)
 {
 	struct shmid_ds *shmseg;
-	int segnum, deallocate = 0;
+	int segnum;
 	vaddr_t end;
 
 	segnum = IPCID_TO_IX(shmmap_s->shmid);
 	if (segnum < 0 || segnum >= shminfo.shmmni ||
 	    (shmseg = shmsegs[segnum]) == NULL)
 		return (EINVAL);
-	if ((--shmseg->shm_nattch <= 0) &&
-	    (shmseg->shm_perm.mode & SHMSEG_REMOVED)) {
-	    	deallocate = 1;
-		shm_last_free = segnum;
-		shmsegs[shm_last_free] = NULL;
-	}
 	end = round_page(shmmap_s->va+shmseg->shm_segsz);
-	uvm_unmap(&vm->vm_map, trunc_page(shmmap_s->va), end);
 	shmmap_s->shmid = -1;
 	shmseg->shm_dtime = gettime();
-	if (deallocate)
+	if ((--shmseg->shm_nattch <= 0) &&
+	    (shmseg->shm_perm.mode & SHMSEG_REMOVED)) {
+		shm_last_free = segnum;
+		shmsegs[shm_last_free] = NULL;
 		shm_deallocate_segment(shmseg);
+	}
+	uvm_unmap(&vm->vm_map, trunc_page(shmmap_s->va), end);
 	return (0);
 }
 
@@ -294,9 +294,9 @@ allocated:
 	if (error) {
 		if ((--shmseg->shm_nattch <= 0) &&
 		    (shmseg->shm_perm.mode & SHMSEG_REMOVED)) {
-			shm_deallocate_segment(shmseg);
 			shm_last_free = IPCID_TO_IX(SCARG(uap, shmid));
 			shmsegs[shm_last_free] = NULL;
+			shm_deallocate_segment(shmseg);
 		} else {
 			uao_detach(shm_handle->shm_object);
 		}
@@ -361,9 +361,9 @@ sys_shmctl(struct proc *p, void *v, register_t *retval)
 		shmseg->shm_perm.key = IPC_PRIVATE;
 		shmseg->shm_perm.mode |= SHMSEG_REMOVED;
 		if (shmseg->shm_nattch <= 0) {
-			shm_deallocate_segment(shmseg);
 			shm_last_free = IPCID_TO_IX(shmid);
 			shmsegs[shm_last_free] = NULL;
+			shm_deallocate_segment(shmseg);
 		}
 		break;
 	case SHM_LOCK:
@@ -595,20 +595,26 @@ shm_reallocate(int val)
  * Userland access to struct shminfo.
  */
 int
-sysctl_sysvshm(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+sysctl_sysvshm_locked(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	void *newp, size_t newlen)
 {
 	int error, val;
 
-	if (namelen != 1)
-                        return (ENOTDIR);       /* leaf-only */
-
 	switch (name[0]) {
 	case KERN_SHMINFO_SHMMAX:
-		if ((error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
-		    &shminfo.shmmax, 0, INT_MAX)) || newp == NULL)
+		/*
+		 * Do not pass shminfo.shmmax directly. If `oldp'
+		 * contains unmapped address sysctl_int_bounded()
+		 * will fail, but value will be updated.
+		 */
+		val = shminfo.shmmax;
+
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &val, 0, INT_MAX);
+		if (error || val == shminfo.shmmax)
 			return (error);
 
+		shminfo.shmmax = val;
 		/* If new shmmax > shmall, crank shmall */
 		if (atop(round_page(shminfo.shmmax)) > shminfo.shmall)
 			shminfo.shmall = atop(round_page(shminfo.shmmax));
@@ -637,4 +643,23 @@ sysctl_sysvshm(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (EOPNOTSUPP);
 	}
 	/* NOTREACHED */
+}
+
+int
+sysctl_sysvshm(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+	void *newp, size_t newlen)
+{
+	int error;
+
+	if (namelen != 1)
+		return (ENOTDIR);       /* leaf-only */
+
+	rw_enter_write(&sysvshm_lock);
+	KERNEL_LOCK();
+	error = sysctl_sysvshm_locked(name, namelen, oldp, oldlenp,
+	    newp, newlen);
+	KERNEL_UNLOCK();
+	rw_exit_write(&sysvshm_lock);
+
+	return (error);
 }

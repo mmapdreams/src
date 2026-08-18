@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.52 2025/08/13 10:26:31 dv Exp $	*/
+/*	$OpenBSD: control.c,v 1.55 2026/07/29 13:32:18 claudio Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -380,7 +380,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 	struct vmop_create_params	 vmc;
 	struct vmop_id			 vid;
 	struct ctl_notify		*notify;
-	int				 n, v, wait = 0, ret = 0;
+	int				 kernfd, n, v, wait = 0, ret = 0;
 	uint32_t			 peer_id = fd, type;
 
 	if ((c = control_connbyfd(fd)) == NULL) {
@@ -402,7 +402,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(&c->iev.ibuf, &imsg)) == -1) {
+		if ((n = imsgbuf_get(&c->iev.ibuf, &imsg)) == -1) {
 			control_close(fd, cs);
 			return;
 		}
@@ -414,11 +414,19 @@ control_dispatch_imsg(int fd, short event, void *arg)
 
 		switch (type) {
 		case IMSG_VMDOP_GET_INFO_VM_REQUEST:
+			if (imsg_get_len(&imsg) != 0)
+				goto fail_imsg;
+			break;
 		case IMSG_VMDOP_WAIT_VM_REQUEST:
 		case IMSG_VMDOP_TERMINATE_VM_REQUEST:
-		case IMSG_VMDOP_START_VM_REQUEST:
 		case IMSG_VMDOP_PAUSE_VM:
 		case IMSG_VMDOP_UNPAUSE_VM:
+			if (imsg_get_len(&imsg) != sizeof(vid))
+				goto fail_imsg;
+			break;
+		case IMSG_VMDOP_START_VM_REQUEST:
+			if (imsg_get_len(&imsg) != sizeof(vmc))
+				goto fail_imsg;
 			break;
 		default:
 			if (c->peercred.uid != 0) {
@@ -450,9 +458,11 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			vmc.vmc_owner.gid = -1;
 
 			/* imsg passed fd may contain kernel image fd. */
+			kernfd = imsg_get_fd(&imsg);
 			if (proc_compose_imsg(ps, PROC_PARENT, type,
-			    peer_id, imsg_get_fd(&imsg), &vmc,
+			    peer_id, kernfd, &vmc,
 			    sizeof(vmc)) == -1) {
+				close_fd(kernfd);
 				control_close(fd, cs);
 				return;
 			}
@@ -513,6 +523,8 @@ control_dispatch_imsg(int fd, short event, void *arg)
 	imsg_event_add(&c->iev);
 	return;
 
+ fail_imsg:
+	imsg_free(&imsg);
  fail:
 	if (ret == 0)
 		ret = EINVAL;

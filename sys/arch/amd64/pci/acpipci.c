@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpipci.c,v 1.11 2025/09/16 12:18:10 hshoexer Exp $	*/
+/*	$OpenBSD: acpipci.c,v 1.13 2026/08/10 15:14:57 hshoexer Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis
  *
@@ -68,6 +68,7 @@ struct acpipci_softc {
 	char		sc_memex_name[32];
 	int		sc_bus;
 	uint32_t	sc_seg;
+	int		sc_domain;
 };
 
 int	acpipci_match(struct device *, void *, void *);
@@ -90,6 +91,27 @@ const char *acpipci_hids[] = {
 int	acpipci_print(void *, const char *);
 int	acpipci_parse_resources(int, union acpi_resource *, void *);
 void	acpipci_osc(struct acpipci_softc *);
+
+/*
+ * Translate the OpenBSD PCI domain enumeration index back to the ACPI
+ * segment number (_SEG).
+ */
+int
+acpipci_domain_to_seg(int domain)
+{
+	struct acpipci_softc *sc;
+	int i;
+
+	for (i = 0; i < acpipci_cd.cd_ndevs; i++) {
+		sc = (struct acpipci_softc *)acpipci_cd.cd_devs[i];
+		if (sc == NULL)
+			continue;
+		if (sc->sc_domain == domain)
+			return sc->sc_seg;
+	}
+
+	return -1;
+}
 
 int
 acpipci_match(struct device *parent, void *match, void *aux)
@@ -126,6 +148,9 @@ acpipci_attach(struct device *parent, struct device *self, void *aux)
 
 	aml_evalinteger(sc->sc_acpi, sc->sc_node, "_SEG", 0, NULL, &seg);
 	sc->sc_seg = seg;
+
+	/* Assigned when the PCI bus attaches. */
+	sc->sc_domain = -1;
 
 	if (aml_evalname(sc->sc_acpi, sc->sc_node, "_CRS", 0, NULL, &res)) {
 		printf(": can't find resources\n");
@@ -219,6 +244,7 @@ acpipci_attach_bus(struct device *parent, struct acpipci_softc *sc)
 	pba.pba_pmemex = sc->sc_memex;
 	pba.pba_domain = pci_ndomains++;
 	pba.pba_bus = sc->sc_bus;
+	sc->sc_domain = pba.pba_domain;
 
 	/* Enable MSI in ACPI 2.0 and above, unless we're told not to. */
 	if (sc->sc_acpi->sc_fadt->hdr.revision >= 2 &&

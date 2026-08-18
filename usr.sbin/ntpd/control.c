@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.28 2026/04/21 14:20:00 henning Exp $ */
+/*	$OpenBSD: control.c,v 1.30 2026/08/04 19:05:21 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -203,8 +203,7 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 	struct ctl_show_status	 c_status;
 	struct ctl_show_peer	 c_peer;
 	struct ctl_show_sensor	 c_sensor;
-	int			 cnt;
-	ssize_t			 n;
+	int			 n, cnt;
 
 	if ((c = control_connbyfd(pfd->fd)) == NULL) {
 		log_warn("control_dispatch_msg: fd %d: not found", pfd->fd);
@@ -226,7 +225,7 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(&c->ibuf, &imsg)) == -1) {
+		if ((n = imsgbuf_get(&c->ibuf, &imsg)) == -1) {
 			*ctl_cnt -= control_close(pfd->fd);
 			return (1);
 		}

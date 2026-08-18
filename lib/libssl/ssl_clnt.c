@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_clnt.c,v 1.173 2026/06/06 15:24:26 jsing Exp $ */
+/* $OpenBSD: ssl_clnt.c,v 1.175 2026/07/15 15:00:17 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -1003,16 +1003,17 @@ ssl3_get_server_hello(SSL *s)
 		goto fatal_err;
 	}
 
-	/* TLS v1.2 only ciphersuites require v1.2 or later. */
-	if ((cipher->algorithm_ssl & SSL_TLSV1_2) &&
-	    s->s3->hs.negotiated_tls_version < TLS1_2_VERSION) {
+	if (!ssl_cipher_in_list(SSL_get_ciphers(s), cipher)) {
+		/* we did not say we would use this cipher */
 		al = SSL_AD_ILLEGAL_PARAMETER;
 		SSLerror(s, SSL_R_WRONG_CIPHER_RETURNED);
 		goto fatal_err;
 	}
 
-	if (!ssl_cipher_in_list(SSL_get_ciphers(s), cipher)) {
-		/* we did not say we would use this cipher */
+	/* Require a ciphersuite that can be used with TLSv1.2. */
+	if (cipher->algorithm_ssl != SSL_SSLV3 &&
+	    cipher->algorithm_ssl != SSL_TLSV1 &&
+	    cipher->algorithm_ssl != SSL_TLSV1_2) {
 		al = SSL_AD_ILLEGAL_PARAMETER;
 		SSLerror(s, SSL_R_WRONG_CIPHER_RETURNED);
 		goto fatal_err;

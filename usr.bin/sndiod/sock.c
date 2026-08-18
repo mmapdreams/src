@@ -1,4 +1,4 @@
-/*	$OpenBSD: sock.c,v 1.64 2026/06/24 15:10:20 ratchov Exp $	*/
+/*	$OpenBSD: sock.c,v 1.69 2026/08/12 10:58:19 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -103,31 +103,6 @@ unsigned int sock_sesrefs = 0;		/* connections to the session */
 uint8_t sock_sescookie[AMSG_COOKIELEN];	/* owner of the session */
 
 /*
- * Old clients used to send dev number and opt name. This routine
- * finds proper opt pointer for the given device.
- */
-static struct opt *
-legacy_opt(int devnum, char *optname)
-{
-	struct dev *d;
-	struct opt *o;
-
-	d = dev_bynum(devnum);
-	if (d == NULL)
-		return NULL;
-	if (strcmp(optname, "default") == 0) {
-		for (o = opt_list; o != NULL; o = o->next) {
-			if (strcmp(o->name, d->name) == 0)
-				return o;
-		}
-		return NULL;
-	} else {
-		o = opt_byname(optname);
-		return (o != NULL && o->dev == d) ? o : NULL;
-	}
-}
-
-/*
  * If control slot is associated to a particular opt, then
  * remove the unused group part of the control name to make mixer
  * look nicer
@@ -167,11 +142,6 @@ sock_close(struct sock *f)
 	if (f->slot) {
 		slot_del(f->slot);
 		f->slot = NULL;
-	}
-	if (f->port) {
-		midi_unlink(f->midi, f->port->midi);
-		port_unref(f->port);
-		f->port = NULL;
 	}
 	if (f->midi) {
 		midi_del(f->midi);
@@ -317,7 +287,6 @@ sock_new(int fd)
 	f->pstate = SOCK_AUTH;
 	f->midithru = NULL;
 	f->slot = NULL;
-	f->port = NULL;
 	f->midi = NULL;
 	f->ctlslot = NULL;
 	f->opt = NULL;
@@ -713,13 +682,12 @@ sock_auth(struct sock *f)
 int
 sock_hello(struct sock *f)
 {
+	char name[CTL_NAMEMAX];
 	struct amsg_hello *p = &f->rmsg.u.hello;
-	struct port *c;
 	struct opt *opt;
 	struct midithru *midithru;
 	unsigned int mode;
 	unsigned int type;
-	unsigned int devnum;
 	unsigned int id;
 
 	mode = ntohs(p->mode);
@@ -761,27 +729,39 @@ sock_hello(struct sock *f)
 #endif
 		return 0;
 	}
-	if (p->devnum == AMSG_NODEV) {
-		type = AMSG_TYPE_SND;
-		devnum = p->devnum;
+
+	/*
+	 * Old audio clients don't set p->type.
+	 */
+	type = AMSG_ISSET(p->type) ? p->type : AMSG_TYPE_MAGIC | AMSG_TYPE_SND;
+
+	/*
+	 * New clients set the AMSG_TYPE_MAGIC bit. Older ones encode
+	 * the (type, device number) pair in the type field, in the MSB
+	 * and LSB nibbles respectively.
+	 */
+	if (type & AMSG_TYPE_MAGIC) {
+		type = type & ~AMSG_TYPE_MAGIC;
+		snprintf(name, sizeof(name), "%s%s",
+		    type == AMSG_TYPE_MIDITHRU ? "default-" : "",
+		    p->opt);
 	} else {
-		type = p->devnum >> 4;
-		devnum = p->devnum & 0xf;
+		type = type >> 4;
+		snprintf(name, sizeof(name), "%s%d",
+		    type == AMSG_TYPE_MIDITHRU ? "default-" : "",
+		    type & 0xf);
 	}
+
 	switch (type) {
 	case AMSG_TYPE_SND:
-		opt = (p->devnum == AMSG_NODEV) ?
-		    opt_byname(p->opt) : legacy_opt(p->devnum, p->opt);
+		opt = opt_byname(name);
 		if (opt == NULL)
 			return 0;
-		midithru = midithru_array + opt->num;
 		break;
 	case AMSG_TYPE_MIDITHRU:
-		midithru = midithru_array + OPT_NMAX + devnum;
-		break;
 	case AMSG_TYPE_MIDI:
-		c = port_bynum(devnum);
-		if (c == NULL)
+		midithru = midithru_byname(name);
+		if (midithru == NULL)
 			return 0;
 		break;
 	default:
@@ -797,18 +777,15 @@ sock_hello(struct sock *f)
 			if (!opt_ref(opt))
 				return 0;
 			f->opt = opt;
-			midithru_addprog(midithru, f->midi);
+			midithru_addprog(f->opt->midithru, f->midi);
 			break;
 		case AMSG_TYPE_MIDITHRU:
+		case AMSG_TYPE_MIDI:
+			if (!midithru_ref(midithru))
+				return 0;
 			f->midithru = midithru;
-			midithru_ref(f->midithru);
 			midithru_addprog(f->midithru, f->midi);
 			break;
-		case AMSG_TYPE_MIDI:
-			if (!port_ref(c))
-				return 0;
-			f->port = c;
-			midi_link(f->midi, c->midi);
 		}
 	} else if (mode & MODE_CTLMASK) {
 		switch (type) {
@@ -816,11 +793,9 @@ sock_hello(struct sock *f)
 			midithru = NULL;
 			break;
 		case AMSG_TYPE_MIDITHRU:
+		case AMSG_TYPE_MIDI:
 			opt = NULL;
 			break;
-		case AMSG_TYPE_MIDI:
-			logx(2, "sock %d: unhandled device", f->fd);
-			return 0;
 		}
 		f->ctlslot = ctlslot_new(opt, midithru, &sock_ctlops, f);
 		if (f->ctlslot == NULL) {

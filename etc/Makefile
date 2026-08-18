@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.492 2025/06/17 01:36:55 dlg Exp $
+#	$OpenBSD: Makefile,v 1.494 2026/08/10 00:51:59 job Exp $
 
 .include <bsd.own.mk>
 
@@ -62,7 +62,8 @@ RCDAEMONS=amd apmd bgpd bgplgd bootparamd bpflogd cron \
 	dhcpd dhcpleased dhcp6leased dhcrelay dhcrelay6 \
 	dvmrpd eigrpd ftpd ftpproxy ftpproxy6 hostapd \
 	hotplugd httpd identd ifstated iked inetd isakmpd iscsid ldapd \
-	ldattach ldomd ldpd lockd lpd mopd mountd mrouted nfsd npppd nsd ntpd \
+	ldattach ldomd ldpd lldpd lockd lpd mopd mountd mrouted \
+	nfsd npppd nsd ntpd \
 	ospf6d ospfd pflogd portmap rad radiusd rarpd rbootd relayd resolvd \
 	ripd route6d sasyncd sensorsd slowcgi slaacd smtpd sndiod snmpd spamd \
 	spamlogd sshd statd syslogd tftpd tftpproxy unbound \
@@ -310,7 +311,7 @@ distrib:
 	bootblocks do-release ${ALL_KERNELS}
 
 SUBDIR+= etc.alpha etc.amd64 etc.arm64 etc.armv7
-SUBDIR+= etc.hppa etc.i386 etc.landisk etc.loongson etc.luna88k
+SUBDIR+= etc.hppa etc.i386 etc.landisk etc.luna88k
 SUBDIR+= etc.macppc etc.octeon etc.powerpc64 etc.riscv64
 SUBDIR+= etc.sparc64
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-join-pane.c,v 1.67 2026/07/03 10:47:32 nicm Exp $ */
+/* $OpenBSD: cmd-join-pane.c,v 1.74 2026/08/03 20:29:52 nicm Exp $ */
 
 /*
  * Copyright (c) 2011 George Nachman <tmux@georgester.com>
@@ -72,8 +72,9 @@ cmd_join_pane_place(struct cmdq_item *item, struct winlink *wl,
 	struct window		*w = wl->window;
 	struct layout_cell	*lc = wp->layout_cell;
 	struct window_pane	*owp;
-	int			 wx = w->sx, wy = w->sy, px = lc->sx;
-	int			 py = lc->sy, xoff = lc->xoff, yoff = lc->yoff;
+	int			 wx = w->sx, wy = w->sy;
+	int			 px = lc->g.sx, py = lc->g.sy;
+	int			 xoff = lc->g.xoff, yoff = lc->g.yoff;
 	int			 border = 1;
 
 	if (window_pane_get_pane_lines(wp) == PANE_LINES_NONE)
@@ -181,12 +182,13 @@ cmd_join_pane_place(struct cmdq_item *item, struct winlink *wl,
 		return (CMD_RETURN_ERROR);
 	}
 
-	if (xoff != lc->xoff || yoff != lc->yoff) {
-		lc->xoff = xoff;
-		lc->yoff = yoff;
+	if (xoff != lc->g.xoff || yoff != lc->g.yoff) {
+		lc->g.xoff = xoff;
+		lc->g.yoff = yoff;
 		layout_fix_panes(w, NULL);
 	}
-	notify_window("window-layout-changed", w);
+	redraw_invalidate_scene(w);
+	events_fire_window("window-layout-changed", w);
 	server_redraw_window(w);
 
 	return (CMD_RETURN_NORMAL);
@@ -201,7 +203,7 @@ cmd_join_pane_move(struct cmdq_item *item, struct args *args,
 	const char		*errstr, *argval;
 	const char		 flags[] = { 'U', 'D', 'L', 'R' };
 	char			*cause = NULL, flag;
-	int			 xoff = lc->xoff, yoff = lc->yoff, adjust;
+	int			 xoff = lc->g.xoff, yoff = lc->g.yoff, adjust;
 	u_int			 i;
 	enum pane_lines		 lines = window_pane_get_pane_lines(wp);
 
@@ -252,11 +254,11 @@ cmd_join_pane_move(struct cmdq_item *item, struct args *args,
 			xoff += adjust;
 	}
 
-	if (xoff != lc->xoff || yoff != lc->yoff) {
-		lc->xoff = xoff;
-		lc->yoff = yoff;
+	if (xoff != lc->g.xoff || yoff != lc->g.yoff) {
+		lc->g.xoff = xoff;
+		lc->g.yoff = yoff;
 		layout_fix_panes(w, NULL);
-		notify_window("window-layout-changed", w);
+		events_fire_window("window-layout-changed", w);
 		server_redraw_window(w);
 	}
 
@@ -320,8 +322,8 @@ cmd_join_pane_mouse_move(struct client *c, struct mouse_event *m)
 		ly = m->statusat - 1;
 
 	if (x != lx || y != ly) {
-		lc->xoff += x - lx;
-		lc->yoff += y - ly;
+		lc->g.xoff += x - lx;
+		lc->g.yoff += y - ly;
 		layout_fix_panes(w, NULL);
 		server_redraw_window(w);
 		server_redraw_window_borders(w);
@@ -358,7 +360,8 @@ cmd_join_pane_zindex(struct cmdq_item *item, struct winlink *wl,
 	else
 		TAILQ_INSERT_TAIL(&w->z_index, wp, zentry);
 
-	notify_window("window-layout-changed", w);
+	redraw_invalidate_scene(w);
+	events_fire_window("window-layout-changed", w);
 	server_redraw_window(w);
 
 	return (CMD_RETURN_NORMAL);
@@ -379,10 +382,11 @@ cmd_join_pane_tile(struct cmdq_item *item, struct args *args, struct window *w,
 		return (CMD_RETURN_ERROR);
 	}
 
-	lc->saved_sx = lc->sx;
-	lc->saved_sy = lc->sy;
-	lc->saved_xoff = lc->xoff;
-	lc->saved_yoff = lc->yoff;
+	lc->fg.sx = lc->g.sx;
+	lc->fg.sy = lc->g.sy;
+	lc->fg.xoff = lc->g.xoff;
+	lc->fg.yoff = lc->g.yoff;
+
 	if (layout_insert_tile(w, lc) != 0) {
 		cmdq_error(item, "no space for a new pane");
 		return (CMD_RETURN_ERROR);
@@ -396,7 +400,8 @@ cmd_join_pane_tile(struct cmdq_item *item, struct args *args, struct window *w,
 		window_set_active_pane(w, wp, 1);
 	layout_fix_offsets(w);
 	layout_fix_panes(w, NULL);
-	notify_window("window-layout-changed", w);
+	redraw_invalidate_scene(w);
+	events_fire_window("window-layout-changed", w);
 	server_redraw_window(w);
 
 	return (CMD_RETURN_NORMAL);
@@ -423,31 +428,41 @@ cmd_join_pane_exec(struct cmd *self, struct cmdq_item *item)
 	dst_wp = target->wp;
 	dst_w = dst_wl->window;
 	dst_idx = dst_wl->idx;
-	server_unzoom_window(dst_w);
 
 	if (cmd_get_entry(self) == &cmd_move_pane_entry) {
 		if (args_has(args, 'M'))
 			return (cmd_join_pane_mouse_update(item));
-		if (!window_pane_is_floating(dst_wp)) {
-			cmdq_error(item, "pane is not floating");
-			return (CMD_RETURN_ERROR);
-		}
-		if ((s = args_get(args, 'P')) != NULL)
-			return (cmd_join_pane_place(item, dst_wl, dst_wp, s));
-		if ((s = args_get(args, 'z')) != NULL)
-			return (cmd_join_pane_zindex(item, dst_wl, dst_wp, s));
-		if (args_has(args, 'X') ||
+		if (args_has(args, 'P') ||
+		    args_has(args, 'z') ||
+		    args_has(args, 'X') ||
 		    args_has(args, 'Y') ||
 		    args_has(args, 'U') ||
 		    args_has(args, 'D') ||
 		    args_has(args, 'L') ||
-		    args_has(args, 'R'))
+		    args_has(args, 'R')) {
+			if (!window_pane_is_floating(dst_wp)) {
+				cmdq_error(item, "pane is not floating");
+				return (CMD_RETURN_ERROR);
+			}
+			server_unzoom_window(dst_w);
+			if ((s = args_get(args, 'P')) != NULL)
+				return (cmd_join_pane_place(item, dst_wl, dst_wp, s));
+			if ((s = args_get(args, 'z')) != NULL)
+				return (cmd_join_pane_zindex(item, dst_wl, dst_wp, s));
 			return (cmd_join_pane_move(item, args, dst_wl, dst_wp));
+		}
 	}
 
 	src_wl = source->wl;
 	src_wp = source->wp;
 	src_w = src_wl->window;
+
+	if (src_wp == src_w->modal || dst_wp == dst_w->modal) {
+		cmdq_error(item, "pane is modal");
+		return (CMD_RETURN_ERROR);
+	}
+
+	server_unzoom_window(dst_w);
 	server_unzoom_window(src_w);
 
 	if (src_wp == dst_wp) {
@@ -456,6 +471,13 @@ cmd_join_pane_exec(struct cmd *self, struct cmdq_item *item)
 		cmdq_error(item, "source and target panes must be different");
 		return (CMD_RETURN_ERROR);
 	}
+
+	if (args_has(args, 'h'))
+		flags |= SPAWN_HORIZONTAL;
+	if (args_has(args, 'b'))
+		flags |= SPAWN_BEFORE;
+	if (args_has(args, 'f'))
+		flags |= SPAWN_FULLSIZE;
 
 	lc = layout_get_tiled_cell(item, args, dst_w, dst_wp, flags, &cause);
 	if (cause != NULL) {
@@ -497,11 +519,12 @@ cmd_join_pane_exec(struct cmd *self, struct cmdq_item *item)
 	} else
 		server_status_session(dst_s);
 
+	window_fire_pane_moved(src_wp, src_w, src_wl->idx, dst_w, dst_idx);
 	if (window_count_panes(src_w, 1) == 0)
 		server_kill_window(src_w, 1);
 	else
-		notify_window("window-layout-changed", src_w);
-	notify_window("window-layout-changed", dst_w);
+		events_fire_window("window-layout-changed", src_w);
+	events_fire_window("window-layout-changed", dst_w);
 
 	return (CMD_RETURN_NORMAL);
 }

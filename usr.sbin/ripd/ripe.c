@@ -1,4 +1,4 @@
-/*	$OpenBSD: ripe.c,v 1.37 2024/11/21 13:38:15 claudio Exp $ */
+/*	$OpenBSD: ripe.c,v 1.39 2026/08/03 18:49:10 claudio Exp $ */
 
 /*
  * Copyright (c) 2006 Michele Marchetto <mydecay@openbeer.it>
@@ -229,8 +229,7 @@ ripe_dispatch_main(int fd, short event, void *bula)
 	struct imsgbuf	*ibuf = &iev->ibuf;
 	struct kif	*kif;
 	struct iface	*iface;
-	ssize_t		 n;
-	int		 link_ok, shut = 0;
+	int		 n, link_ok, shut = 0;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -248,8 +247,8 @@ ripe_dispatch_main(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("ripe_dispatch_main: imsg_get error");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("ripe_dispatch_main: imsgbuf_get error");
 		if (n == 0)
 			break;
 
@@ -310,8 +309,7 @@ ripe_dispatch_rde(int fd, short event, void *bula)
 	struct imsgbuf		*ibuf = &iev->ibuf;
 	struct iface		*iface;
 	struct nbr		*nbr;
-	ssize_t			 n;
-	int			 shut = 0;
+	int			 n, shut = 0;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -329,8 +327,8 @@ ripe_dispatch_rde(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("ripe_dispatch_rde: imsg_get error");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("ripe_dispatch_rde: imsgbuf_get error");
 		if (n == 0)
 			break;
 

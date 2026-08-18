@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfe.c,v 1.95 2026/06/15 11:02:13 rsadowski Exp $	*/
+/*	$OpenBSD: pfe.c,v 1.101 2026/08/12 19:29:34 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -151,8 +151,9 @@ pfe_dispatch_hce(int fd, struct privsep_proc *p, struct imsg *imsg)
 			break;
 
 		/* Forward to relay engine(s) */
-		proc_compose(env->sc_ps, PROC_RELAY,
-		    IMSG_HOST_STATUS, &st, sizeof(st));
+		if (proc_compose(env->sc_ps, PROC_RELAY, IMSG_HOST_STATUS, &st,
+		    sizeof(st)) == -1)
+			log_warn("%s: proc_compose", __func__);
 
 		if ((table = table_find(env, host->conf.tableid)) ==
 		    NULL)
@@ -201,34 +202,44 @@ pfe_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	switch (imsg_get_type(imsg)) {
 	case IMSG_CFG_TABLE:
-		config_gettable(env, imsg);
+		if (config_gettable(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_HOST:
-		config_gethost(env, imsg);
+		if (config_gethost(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RDR:
-		config_getrdr(env, imsg);
+		if (config_getrdr(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_VIRT:
-		config_getvirt(env, imsg);
+		if (config_getvirt(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_ROUTER:
-		config_getrt(env, imsg);
+		if (config_getrt(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_ROUTE:
-		config_getroute(env, imsg);
+		if (config_getroute(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_PROTO:
-		config_getproto(env, imsg);
+		if (config_getproto(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RELAY:
-		config_getrelay(env, imsg);
+		if (config_getrelay(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_RELAY_TABLE:
-		config_getrelaytable(env, imsg);
+		if (config_getrelaytable(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_DONE:
-		config_getcfg(env, imsg);
+		if (config_getcfg(env, imsg) != 0)
+			return (-1);
 		init_tables(env);
 		agentx_init(env);
 		break;
@@ -237,7 +248,8 @@ pfe_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		pfe_sync();
 		break;
 	case IMSG_CTL_RESET:
-		config_getreset(env, imsg);
+		if (config_getreset(env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_AGENTXSOCK:
 		agentx_getsock(imsg);
@@ -268,8 +280,9 @@ pfe_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 			fatalx("%s: invalid relay proc", __func__);
 		if (natlook(env, &cnl) != 0)
 			cnl.in = -1;
-		proc_compose_imsg(env->sc_ps, PROC_RELAY, cnl.proc,
-		    IMSG_NATLOOK, -1, -1, &cnl, sizeof(cnl));
+		if (proc_compose_imsg(env->sc_ps, PROC_RELAY, cnl.proc,
+		    IMSG_NATLOOK, -1, -1, &cnl, sizeof(cnl)) == -1)
+			log_warn("%s: proc_compose_imsg", __func__);
 		break;
 	case IMSG_STATISTICS:
 		if (imsg_get_data(imsg, &crs, sizeof(crs)) == -1)
@@ -290,9 +303,9 @@ pfe_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 			    __func__, con.se_cid);
 			return (0);
 		}
-		imsg_compose_event(&c->iev,
-		    IMSG_CTL_SESSION, 0, 0, -1,
-		    &con, sizeof(con));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_SESSION, 0, 0, -1,
+		    &con, sizeof(con)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
 		break;
 	case IMSG_CTL_END:
 		if (imsg_get_data(imsg, &cid, sizeof(cid)) == -1)
@@ -307,8 +320,9 @@ pfe_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 			return (0);
 		} else if (--c->waiting == 0) {
 			/* Last ack for a previous request */
-			imsg_compose_event(&c->iev, IMSG_CTL_END,
-			    0, 0, -1, NULL, 0);
+			if (imsg_compose_event(&c->iev, IMSG_CTL_END, 0, 0, -1,
+			    NULL, 0) == -1)
+				log_warn("%s: imsg_compose_event", __func__);
 		}
 		break;
 	case IMSG_SESS_PUBLISH:
@@ -340,7 +354,7 @@ pfe_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 			TAILQ_REMOVE(&env->sc_sessions, s, se_entry);
 			free(s);
 		} else {
-			DPRINTF("removal of unpublished session %i", sid);
+			log_debug("removal of unpublished session %i", sid);
 		}
 		break;
 	default:
@@ -363,49 +377,64 @@ show(struct ctl_conn *c)
 	if (env->sc_rdrs == NULL)
 		goto relays;
 	TAILQ_FOREACH(rdr, env->sc_rdrs, entry) {
-		imsg_compose_event(&c->iev, IMSG_CTL_RDR, 0, 0, -1,
-		    rdr, sizeof(*rdr));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_RDR, 0, 0, -1,
+		    rdr, sizeof(*rdr)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
 		if (rdr->conf.flags & F_DISABLE)
 			continue;
 
-		imsg_compose_event(&c->iev, IMSG_CTL_RDR_STATS, 0, 0, -1,
-		    &rdr->stats, sizeof(rdr->stats));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_RDR_STATS, 0, 0, -1,
+		    &rdr->stats, sizeof(rdr->stats)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
 
-		imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
-		    rdr->table, sizeof(*rdr->table));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
+		    rdr->table, sizeof(*rdr->table)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
+
 		if (!(rdr->table->conf.flags & F_DISABLE))
 			TAILQ_FOREACH(host, &rdr->table->hosts, entry)
-				imsg_compose_event(&c->iev, IMSG_CTL_HOST,
-				    0, 0, -1, host, sizeof(*host));
+				if (imsg_compose_event(&c->iev, IMSG_CTL_HOST,
+				    0, 0, -1, host, sizeof(*host)) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 
 		if (rdr->backup->conf.id == EMPTY_TABLE)
 			continue;
-		imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
-		    rdr->backup, sizeof(*rdr->backup));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
+		    rdr->backup, sizeof(*rdr->backup)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
 		if (!(rdr->backup->conf.flags & F_DISABLE))
 			TAILQ_FOREACH(host, &rdr->backup->hosts, entry)
-				imsg_compose_event(&c->iev, IMSG_CTL_HOST,
-				    0, 0, -1, host, sizeof(*host));
+				if (imsg_compose_event(&c->iev, IMSG_CTL_HOST,
+				    0, 0, -1, host, sizeof(*host)) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 	}
 relays:
 	if (env->sc_relays == NULL)
 		goto routers;
 	TAILQ_FOREACH(rlay, env->sc_relays, rl_entry) {
 		rlay->rl_stats[env->sc_conf.prefork_relay].id = EMPTY_ID;
-		imsg_compose_event(&c->iev, IMSG_CTL_RELAY, 0, 0, -1,
-		    rlay, sizeof(*rlay));
-		imsg_compose_event(&c->iev, IMSG_CTL_RELAY_STATS, 0, 0, -1,
-		    &rlay->rl_stats, sizeof(rlay->rl_stats));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_RELAY, 0, 0, -1,
+		    rlay, sizeof(*rlay)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
+
+		if (imsg_compose_event(&c->iev, IMSG_CTL_RELAY_STATS, 0, 0, -1,
+		    &rlay->rl_stats, sizeof(rlay->rl_stats)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
 
 		TAILQ_FOREACH(rlt, &rlay->rl_tables, rlt_entry) {
-			imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
-			    rlt->rlt_table, sizeof(*rlt->rlt_table));
+			if (imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0,
+			    -1, rlt->rlt_table, sizeof(*rlt->rlt_table)) == -1)
+				log_warn("%s: imsg_compose_event", __func__);
 			if (!(rlt->rlt_table->conf.flags & F_DISABLE))
 				TAILQ_FOREACH(host,
 				    &rlt->rlt_table->hosts, entry)
-					imsg_compose_event(&c->iev,
+					if (imsg_compose_event(&c->iev,
 					    IMSG_CTL_HOST, 0, 0, -1,
-					    host, sizeof(*host));
+					    host, sizeof(*host)) == -1)
+						log_warn("%s: imsg_compose_event",
+						    __func__);
 		}
 	}
 
@@ -413,24 +442,31 @@ routers:
 	if (env->sc_rts == NULL)
 		goto end;
 	TAILQ_FOREACH(rt, env->sc_rts, rt_entry) {
-		imsg_compose_event(&c->iev, IMSG_CTL_ROUTER, 0, 0, -1,
-		    rt, sizeof(*rt));
+		if (imsg_compose_event(&c->iev, IMSG_CTL_ROUTER, 0, 0, -1,
+		    rt, sizeof(*rt)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
 		if (rt->rt_conf.flags & F_DISABLE)
 			continue;
 
 		TAILQ_FOREACH(nr, &rt->rt_netroutes, nr_entry)
-			imsg_compose_event(&c->iev, IMSG_CTL_NETROUTE,
-			    0, 0, -1, nr, sizeof(*nr));
-		imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
-		    rt->rt_gwtable, sizeof(*rt->rt_gwtable));
+			if (imsg_compose_event(&c->iev, IMSG_CTL_NETROUTE,
+			    0, 0, -1, nr, sizeof(*nr)) == -1)
+				log_warn("%s: imsg_compose_event", __func__);
+		if (imsg_compose_event(&c->iev, IMSG_CTL_TABLE, 0, 0, -1,
+		    rt->rt_gwtable, sizeof(*rt->rt_gwtable)) == -1)
+			log_warn("%s: imsg_compose_event", __func__);
+
 		if (!(rt->rt_gwtable->conf.flags & F_DISABLE))
 			TAILQ_FOREACH(host, &rt->rt_gwtable->hosts, entry)
-				imsg_compose_event(&c->iev, IMSG_CTL_HOST,
-				    0, 0, -1, host, sizeof(*host));
+				if (imsg_compose_event(&c->iev, IMSG_CTL_HOST,
+				    0, 0, -1, host, sizeof(*host)) == -1)
+					log_warn("%s: imsg_compose_event",
+					    __func__);
 	}
 
 end:
-	imsg_compose_event(&c->iev, IMSG_CTL_END, 0, 0, -1, NULL, 0);
+	if (imsg_compose_event(&c->iev, IMSG_CTL_END, 0, 0, -1, NULL, 0) == -1)
+		log_warn("%s: imsg_compose_event", __func__);
 }
 
 void
@@ -444,8 +480,9 @@ show_sessions(struct ctl_conn *c)
 		/*
 		 * Request all the running sessions from the process
 		 */
-		proc_compose_imsg(env->sc_ps, PROC_RELAY, proc,
-		    IMSG_CTL_SESSION, -1, -1, &cid, sizeof(cid));
+		if (proc_compose_imsg(env->sc_ps, PROC_RELAY, proc,
+		    IMSG_CTL_SESSION, -1, -1, &cid, sizeof(cid)) == -1)
+			log_warn("%s: proc_compose_imsg", __func__);
 		c->waiting++;
 	}
 }
@@ -533,12 +570,14 @@ disable_table(struct ctl_conn *c, struct ctl_id *id)
 	table->up = 0;
 	TAILQ_FOREACH(host, &table->hosts, entry)
 		host->up = HOST_UNKNOWN;
-	proc_compose(env->sc_ps, PROC_HCE, IMSG_TABLE_DISABLE,
-	    &table->conf.id, sizeof(table->conf.id));
+	if (proc_compose(env->sc_ps, PROC_HCE, IMSG_TABLE_DISABLE,
+	    &table->conf.id, sizeof(table->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	/* Forward to relay engine(s) */
-	proc_compose(env->sc_ps, PROC_RELAY, IMSG_TABLE_DISABLE,
-	    &table->conf.id, sizeof(table->conf.id));
+	if (proc_compose(env->sc_ps, PROC_RELAY, IMSG_TABLE_DISABLE,
+	    &table->conf.id, sizeof(table->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	log_debug("%s: table %d", __func__, table->conf.id);
 	pfe_sync();
@@ -569,12 +608,14 @@ enable_table(struct ctl_conn *c, struct ctl_id *id)
 	table->up = 0;
 	TAILQ_FOREACH(host, &table->hosts, entry)
 		host->up = HOST_UNKNOWN;
-	proc_compose(env->sc_ps, PROC_HCE, IMSG_TABLE_ENABLE,
-	    &table->conf.id, sizeof(table->conf.id));
+	if (proc_compose(env->sc_ps, PROC_HCE, IMSG_TABLE_ENABLE,
+	    &table->conf.id, sizeof(table->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	/* Forward to relay engine(s) */
-	proc_compose(env->sc_ps, PROC_RELAY, IMSG_TABLE_ENABLE,
-	    &table->conf.id, sizeof(table->conf.id));
+	if (proc_compose(env->sc_ps, PROC_RELAY, IMSG_TABLE_ENABLE,
+	    &table->conf.id, sizeof(table->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	log_debug("%s: table %d", __func__, table->conf.id);
 	pfe_sync();
@@ -616,12 +657,15 @@ disable_host(struct ctl_conn *c, struct ctl_id *id, struct host *host)
 	host->check_cnt = 0;
 	host->up_cnt = 0;
 
-	proc_compose(env->sc_ps, PROC_HCE, IMSG_HOST_DISABLE,
-	    &host->conf.id, sizeof(host->conf.id));
+	if (proc_compose(env->sc_ps, PROC_HCE, IMSG_HOST_DISABLE,
+	    &host->conf.id, sizeof(host->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	/* Forward to relay engine(s) */
-	proc_compose(env->sc_ps, PROC_RELAY, IMSG_HOST_DISABLE,
-	    &host->conf.id, sizeof(host->conf.id));
+	if (proc_compose(env->sc_ps, PROC_RELAY, IMSG_HOST_DISABLE,
+	    &host->conf.id, sizeof(host->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
+
 	log_debug("%s: host %d", __func__, host->conf.id);
 
 	if (!host->conf.parentid) {
@@ -669,12 +713,14 @@ enable_host(struct ctl_conn *c, struct ctl_id *id, struct host *host)
 	host->flags &= ~(F_DEL);
 	host->flags &= ~(F_ADD);
 
-	proc_compose(env->sc_ps, PROC_HCE, IMSG_HOST_ENABLE,
-	    &host->conf.id, sizeof(host->conf.id));
+	if (proc_compose(env->sc_ps, PROC_HCE, IMSG_HOST_ENABLE,
+	    &host->conf.id, sizeof(host->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	/* Forward to relay engine(s) */
-	proc_compose(env->sc_ps, PROC_RELAY, IMSG_HOST_ENABLE,
-	    &host->conf.id, sizeof(host->conf.id));
+	if (proc_compose(env->sc_ps, PROC_RELAY, IMSG_HOST_ENABLE,
+	    &host->conf.id, sizeof(host->conf.id)) == -1)
+		log_warn("%s: proc_compose", __func__);
 
 	log_debug("%s: host %d", __func__, host->conf.id);
 
@@ -704,14 +750,11 @@ pfe_sync(void)
 	struct table		*active;
 	struct table		*table;
 	struct ctl_id		 id;
-	struct imsg		 imsg;
 	struct ctl_demote	 demote;
 	struct router		*rt;
 
 	bzero(&id, sizeof(id));
-	bzero(&imsg, sizeof(imsg));
 	TAILQ_FOREACH(rdr, env->sc_rdrs, entry) {
-		rdr->conf.flags &= ~(F_BACKUP);
 		rdr->conf.flags &= ~(F_DOWN);
 
 		if (rdr->conf.flags & F_DISABLE ||
@@ -719,7 +762,6 @@ pfe_sync(void)
 			rdr->conf.flags |= F_DOWN;
 			active = NULL;
 		} else if (rdr->table->up == 0 && rdr->backup->up > 0) {
-			rdr->conf.flags |= F_BACKUP;
 			active = rdr->backup;
 			active->conf.flags |=
 			    rdr->table->conf.flags & F_CHANGED;
@@ -729,12 +771,10 @@ pfe_sync(void)
 			active = rdr->table;
 
 		if (active != NULL && active->conf.flags & F_CHANGED) {
-			id.id = active->conf.id;
-			imsg.hdr.type = IMSG_CTL_TABLE_CHANGED;
-			imsg.hdr.len = sizeof(id) + IMSG_HEADER_SIZE;
-			imsg.data = &id;
 			sync_table(env, rdr, active);
-			control_imsg_forward(&imsg);
+			id.id = active->conf.id;
+			control_imsg_notify(IMSG_CTL_TABLE_CHANGED, &id,
+			    sizeof(id));
 		}
 
 		if (rdr->conf.flags & F_DOWN) {
@@ -743,26 +783,21 @@ pfe_sync(void)
 				log_debug("%s: disabling ruleset", __func__);
 				rdr->conf.flags &= ~(F_ACTIVE_RULESET);
 				id.id = rdr->conf.id;
-				imsg.hdr.type = IMSG_CTL_PULL_RULESET;
-				imsg.hdr.len = sizeof(id) + IMSG_HEADER_SIZE;
-				imsg.data = &id;
 				sync_ruleset(env, rdr, 0);
-				control_imsg_forward(&imsg);
+				control_imsg_notify(IMSG_CTL_PULL_RULESET, &id,
+				    sizeof(id));
 			}
 		} else if (!(rdr->conf.flags & F_ACTIVE_RULESET)) {
 			log_debug("%s: enabling ruleset", __func__);
 			rdr->conf.flags |= F_ACTIVE_RULESET;
 			id.id = rdr->conf.id;
-			imsg.hdr.type = IMSG_CTL_PUSH_RULESET;
-			imsg.hdr.len = sizeof(id) + IMSG_HEADER_SIZE;
-			imsg.data = &id;
 			sync_ruleset(env, rdr, 1);
-			control_imsg_forward(&imsg);
+			control_imsg_notify(IMSG_CTL_PUSH_RULESET, &id,
+			    sizeof(id));
 		}
 	}
 
 	TAILQ_FOREACH(rt, env->sc_rts, rt_entry) {
-		rt->rt_conf.flags &= ~(F_BACKUP);
 		rt->rt_conf.flags &= ~(F_DOWN);
 
 		if ((rt->rt_gwtable->conf.flags & F_CHANGED))
@@ -797,8 +832,9 @@ pfe_sync(void)
 		    demote.level, table->conf.name, table->conf.demote_group);
 		(void)strlcpy(demote.group, table->conf.demote_group,
 		    sizeof(demote.group));
-		proc_compose(env->sc_ps, PROC_PARENT, IMSG_DEMOTE,
-		    &demote, sizeof(demote));
+		if (proc_compose(env->sc_ps, PROC_PARENT, IMSG_DEMOTE,
+		    &demote, sizeof(demote)) == -1)
+			log_warn("%s: proc_compose", __func__);
 	}
 }
 

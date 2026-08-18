@@ -1,4 +1,4 @@
-/* $OpenBSD: acpidmar.c,v 1.16 2026/06/29 20:15:29 kettenis Exp $ */
+/* $OpenBSD: acpidmar.c,v 1.20 2026/08/10 15:14:57 hshoexer Exp $ */
 /*
  * Copyright (c) 2015 Jordan Hargrave <jordan_hargrave@hotmail.com>
  *
@@ -21,6 +21,7 @@
 #include <sys/device.h>
 #include <sys/malloc.h>
 #include <sys/queue.h>
+#include <sys/extent.h>
 #include <sys/types.h>
 #include <sys/mbuf.h>
 #include <sys/proc.h>
@@ -144,6 +145,18 @@ struct domain {
 	struct extent		*iovamap;
 	TAILQ_HEAD(,domain_dev)	devices;
 	TAILQ_ENTRY(domain)	link;
+};
+
+struct ppbwin_entry {
+	TAILQ_ENTRY(ppbwin_entry) link;
+	int			segment;
+	uint16_t		sid;			/* bridge BDF (sid) */
+	uint8_t			sec;			/* secondary bus */
+	uint8_t			sub;			/* subordinate bus */
+	bus_addr_t		mem_base;
+	bus_size_t		mem_size;
+	bus_addr_t		pmem_base;
+	bus_size_t		pmem_size;
 };
 
 #define DOM_DEBUG 0x1
@@ -284,6 +297,7 @@ struct acpidmar_softc {
 	TAILQ_HEAD(,atsr_softc)	sc_atsrs;
 
 	TAILQ_HEAD(,ivmd_entry) sc_ivmds;
+	TAILQ_HEAD(,ppbwin_entry) sc_ppbwins;
 };
 
 int		acpidmar_activate(struct device *, int);
@@ -827,14 +841,14 @@ domain_load_map(struct domain *dom, bus_dmamap_t map, int flags, int pteflag,
 			if (error)
 				goto fail;
 
+			if (debugme(dom)) {
+				printf("  LOADMAP: %.16llx %x => %.16llx\n",
+				    (uint64_t)seg->ds_addr,
+				    (uint32_t)seg->ds_len, (uint64_t)res);
+			}
+
 			/* Reassign DMA address */
 			seg->ds_addr = res | (seg->ds_addr & VTD_PAGE_MASK);
-		}
-
-		if (debugme(dom)) {
-			printf("  LOADMAP: %.16llx %x => %.16llx\n",
-			    (uint64_t)seg->ds_addr, (uint32_t)seg->ds_len,
-			    (uint64_t)res);
 		}
 
 		mapped_nsegs = i + 1;
@@ -915,7 +929,7 @@ dmar_dmamap_destroy(bus_dma_tag_t tag, bus_dmamap_t dmam)
 {
 	struct dmar_map_cookie *mc = dmam->_dm_cookie;
 
-	dmar_dumpseg(tag, dmam->dm_nsegs, dmam->dm_segs, __FUNCTION__);
+	dmar_dmamap_unload(tag, dmam);
 	free(mc->dm_er, M_DEVBUF, dmam->_dm_segcnt * sizeof(*mc->dm_er));
 	free(mc, M_DEVBUF, sizeof(*mc));
 	_bus_dmamap_destroy(tag, dmam);
@@ -2092,7 +2106,7 @@ domain_create(struct iommu_softc *iommu, int did)
 	/* Setup DMA */
 	dom->dmat._cookie = dom;
 	dom->dmat._dmamap_create = dmar_dmamap_create;		/* nop */
-	dom->dmat._dmamap_destroy = dmar_dmamap_destroy;	/* nop */
+	dom->dmat._dmamap_destroy = dmar_dmamap_destroy;	/* um */
 	dom->dmat._dmamap_load = dmar_dmamap_load;		/* lm */
 	dom->dmat._dmamap_load_mbuf = dmar_dmamap_load_mbuf;	/* lm */
 	dom->dmat._dmamap_load_uio = dmar_dmamap_load_uio;	/* lm */
@@ -2240,6 +2254,133 @@ domain_lookup(struct acpidmar_softc *sc, int segment, int sid)
 	domain_add_device(dom, sid);
 
 	return dom;
+}
+
+static struct ppbwin_entry *
+acpidmar_ppbwin_topmost(struct acpidmar_softc *sc, int segment, int bus)
+{
+	struct ppbwin_entry *pw, *best = NULL;
+
+	TAILQ_FOREACH(pw, &sc->sc_ppbwins, link) {
+		if (pw->segment != segment)
+			continue;
+		if (bus < pw->sec || bus > pw->sub)
+			continue;
+		if (best == NULL || pw->sec < best->sec ||
+		    (pw->sec == best->sec && pw->sub > best->sub))
+			best = pw;
+	}
+
+	return best;
+}
+
+struct ppbwin_entry *
+acpidmar_ppbwin_lookup(struct acpidmar_softc *sc, int segment, uint16_t sid)
+{
+	struct ppbwin_entry *pw;
+
+	TAILQ_FOREACH(pw, &sc->sc_ppbwins, link) {
+		if (pw->segment == segment && pw->sid == sid)
+			return pw;
+	}
+	return NULL;
+}
+
+void
+acpidmar_ppbwin_record(struct acpidmar_softc *sc, pci_chipset_tag_t pc,
+    struct pci_attach_args *pa, int segment, uint16_t sid)
+{
+	struct ppbwin_entry *pw;
+	pcireg_t blr;
+	bus_addr_t base, limit;
+	bus_size_t size;
+	uint8_t sec, sub;
+
+	/*
+	 * Record PCI-PCI bridge forwarding windows keyed by ACPI segment.
+	 * IOMMU domains for devices in segment can then exclude those
+	 * windows from DVA allocation.
+	 */
+	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_BUSINFO);
+	sec = PPB_BUSINFO_SECONDARY(blr);
+	sub = PPB_BUSINFO_SUBORDINATE(blr);
+	if (sub < sec || sub == 0)
+		return;
+
+	pw = acpidmar_ppbwin_lookup(sc, segment, sid);
+	if (pw == NULL) {
+		pw = malloc(sizeof(*pw), M_DEVBUF, M_ZERO | M_WAITOK);
+		pw->segment = segment;
+		pw->sid = sid;
+		TAILQ_INSERT_TAIL(&sc->sc_ppbwins, pw, link);
+	}
+	pw->sec = sec;
+	pw->sub = sub;
+
+	/* Non-prefetchable memory window */
+	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_MEM);
+	base = (bus_addr_t)((blr & 0x0000fff0) << 16);
+	limit = (bus_addr_t)((blr & 0xfff00000) | 0x000fffff);
+	if (limit > base)
+		size = (bus_size_t)(limit - base + 1);
+	else
+		size = 0;
+	pw->mem_base = base;
+	pw->mem_size = size;
+
+	/* Prefetchable memory window */
+	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFMEM);
+	base = (bus_addr_t)((blr & 0x0000fff0) << 16);
+	limit = (bus_addr_t)((blr & 0xfff00000) | 0x000fffff);
+#ifdef __LP64__
+	/*
+	 * Only include the high 32-bit registers when the bridge indicates
+	 * a 64-bit prefetchable window.
+	 */
+	if ((blr & 0x000f000f) == 0x00010001) {
+		pcireg_t hi;
+
+		hi = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFBASE_HI32);
+		base |= ((uint64_t)hi << 32);
+		hi = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFLIM_HI32);
+		limit |= ((uint64_t)hi << 32);
+	}
+#endif
+	if (limit > base)
+		size = (bus_size_t)(limit - base + 1);
+	else
+		size = 0;
+	pw->pmem_base = base;
+	pw->pmem_size = size;
+}
+
+void
+acpidmar_ppbwin_reserve(struct acpidmar_softc *sc, struct domain *dom,
+    int segment, int bus)
+{
+	struct ppbwin_entry *pw;
+	bus_addr_t start;
+	bus_size_t size;
+
+	pw = acpidmar_ppbwin_topmost(sc, segment, bus);
+	if (pw == NULL)
+		return;
+
+	/* Reserve non-prefetchable bridge window */
+	if (pw->mem_size != 0) {
+		start = pw->mem_base;
+		size = pw->mem_size;
+		extent_alloc_region(dom->iovamap, start, size,
+                    EX_WAITOK | EX_CONFLICTOK);
+	}
+
+	/* Reserve prefetchable bridge window */
+	if (pw->pmem_size != 0) {
+		start = pw->pmem_base;
+		size = pw->pmem_size;
+		extent_alloc_region(dom->iovamap, start, size,
+                    EX_WAITOK | EX_CONFLICTOK);
+	}
 }
 
 /* Map Guest Pages into IOMMU */
@@ -2393,14 +2534,18 @@ acpidmar_pci_attach(struct acpidmar_softc *sc, int segment, int sid, int mapctx)
 void
 acpidmar_pci_hook(pci_chipset_tag_t pc, struct pci_attach_args *pa)
 {
-	int		bus, dev, fun, sid, rc;
+	int		bus, dev, fun, sid;
+	int		segment;
 	struct domain	*dom;
-	pcireg_t	reg;
+	pcireg_t	reg, bhlc;
+	int		hdrtype;
 
 	if (!acpidmar_sc) {
 		/* No DMAR, ignore */
 		return;
 	}
+
+	acpidmar_sc->sc_pc = pc;
 
 	/* Add device to our list if valid */
 	pci_decompose_tag(pc, pa->pa_tag, &bus, &dev, &fun);
@@ -2410,10 +2555,22 @@ acpidmar_pci_hook(pci_chipset_tag_t pc, struct pci_attach_args *pa)
 
 	reg = pci_conf_read(pc, pa->pa_tag, PCI_CLASS_REG);
 
+	segment = acpipci_domain_to_seg(pa->pa_domain);
+	KASSERT(segment >= 0);
+
+	/* Record PCI-PCI bridge forwarding windows */
+	bhlc = pci_conf_read(pc, pa->pa_tag, PCI_BHLC_REG);
+	hdrtype = PCI_HDRTYPE_TYPE(bhlc);	/* header > class/subclass */
+	if (hdrtype == 0x01)
+		acpidmar_ppbwin_record(acpidmar_sc, pc, pa, segment, sid);
+
 	/* Add device to domain */
-	dom = acpidmar_pci_attach(acpidmar_sc, pa->pa_domain, sid, 0);
+	dom = acpidmar_pci_attach(acpidmar_sc, segment, sid, 0);
 	if (dom == NULL)
 		return;
+
+	/* Reserve upstream PCI-PCI bridge windows from this domain */
+	acpidmar_ppbwin_reserve(acpidmar_sc, dom, segment, bus);
 
 	if (PCI_CLASS(reg) == PCI_CLASS_DISPLAY &&
 	    PCI_SUBCLASS(reg) == PCI_SUBCLASS_DISPLAY_VGA) {
@@ -2423,16 +2580,12 @@ acpidmar_pci_hook(pci_chipset_tag_t pc, struct pci_attach_args *pa)
 	    PCI_SUBCLASS(reg) == PCI_SUBCLASS_BRIDGE_ISA) {
 		/* For ISA Bridges, map 0-16Mb as 1:1 */
 		printf("dmar: %.4x:%.2x:%.2x.%x mapping ISA\n",
-		    pa->pa_domain, bus, dev, fun);
+		    segment, bus, dev, fun);
 		domain_map_pthru(dom, 0x00, 16*1024*1024);
 
 		/* Keep the identity mapped IOVA range out of the allocator */
-		rc = extent_alloc_region(dom->iovamap, 0,
-		    16*1024*1024, EX_WAITOK | EX_CONFLICTOK);
-		if (rc) {
-			printf("%s: reserve ISA IOVA region failed (%d)\n",
-			    dom->exname, rc);
-		}
+		extent_alloc_region(dom->iovamap, 0, 16*1024*1024,
+		    EX_WAITOK | EX_CONFLICTOK);
 	}
 
 	/*
@@ -2594,7 +2747,7 @@ acpidmar_init(struct acpidmar_softc *sc, struct acpi_dmar *dmar)
 	struct domain		*dom;
 	struct dmar_devlist	*dl;
 	union acpidmar_entry	*de;
-	int			off, sid, rc;
+	int			off, sid;
 
 	domain_map_page = domain_map_page_intel;
 	printf(": hardware width: %d, intr_remap:%d x2apic_opt_out:%d\n",
@@ -2607,6 +2760,7 @@ acpidmar_init(struct acpidmar_softc *sc, struct acpi_dmar *dmar)
 	TAILQ_INIT(&sc->sc_drhds);
 	TAILQ_INIT(&sc->sc_rmrrs);
 	TAILQ_INIT(&sc->sc_atsrs);
+	TAILQ_INIT(&sc->sc_ppbwins);
 
 	off = sizeof(*dmar);
 	while (off < dmar->hdr.length) {
@@ -2656,13 +2810,8 @@ acpidmar_init(struct acpidmar_softc *sc, struct acpi_dmar *dmar)
 
 				/* Keep the identity mapped region out of the IOVA allocator */
 				len = rmrr->end - rmrr->start;
-				rc = extent_alloc_region(dom->iovamap,
-				    rmrr->start, len,
+				extent_alloc_region(dom->iovamap, rmrr->start, len,
 				    EX_WAITOK | EX_CONFLICTOK);
-				if (rc) {
-					printf("%s: rmrr extent reserve failed (%d)\n",
-					    dom_bdf(dom), rc);
-				}
 			}
 		}
 	}
@@ -2740,7 +2889,7 @@ ivhd_showpage(struct iommu_softc *iommu, int sid, paddr_t paddr)
 	if (show > 10)
 		return;
 	show++;
-	dom = acpidmar_pci_attach(acpidmar_sc, 0, sid, 0);
+	dom = acpidmar_pci_attach(acpidmar_sc, iommu->segment, sid, 0);
 	if (!dom)
 		return;
 	printf("DTE: %.8x %.8x %.8x %.8x %.8x %.8x %.8x %.8x\n",
@@ -3445,6 +3594,7 @@ acpiivrs_init(struct acpidmar_softc *sc, struct acpi_ivrs *ivrs)
 	TAILQ_INIT(&sc->sc_drhds);
 	TAILQ_INIT(&sc->sc_rmrrs);
 	TAILQ_INIT(&sc->sc_atsrs);
+	TAILQ_INIT(&sc->sc_ppbwins);
 
 	DPRINTF(0,"======== IVRS\n");
 	off = sizeof(*ivrs);

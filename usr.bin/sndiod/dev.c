@@ -1,4 +1,4 @@
-/*	$OpenBSD: dev.c,v 1.141 2026/06/24 14:54:50 ratchov Exp $	*/
+/*	$OpenBSD: dev.c,v 1.146 2026/08/12 08:04:16 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -529,7 +529,7 @@ dev_sub_bcopy(struct dev *d, struct slot *s)
 void
 dev_cycle(struct dev *d)
 {
-	struct slot *s, **ps;
+	struct slot *s, *snext;
 	unsigned char *base;
 	int nsamp;
 
@@ -573,8 +573,9 @@ dev_cycle(struct dev *d)
 	}
 	if ((d->mode & MODE_REC) && d->decbuf)
 		dec_do(&d->dec, d->decbuf, (unsigned char *)d->rbuf, d->round);
-	ps = &d->slot_list;
-	while ((s = *ps) != NULL) {
+
+	for (s = d->slot_list; s != NULL; s = snext) {
+		snext = s->next;
 #ifdef DEBUG
 		logx(4, "slot%zu: running, skip = %d", s - slot_array, s->skip);
 #endif
@@ -586,7 +587,6 @@ dev_cycle(struct dev *d)
 		slot_skip(s);
 		if (s->skip < 0) {
 			s->skip++;
-			ps = &s->next;
 			continue;
 		}
 
@@ -607,14 +607,14 @@ dev_cycle(struct dev *d)
 			 * layer, so s->mix.buf.used == 0 and we can
 			 * destroy the buffer
 			 */
-			*ps = s->next;
-			s->pstate = SLOT_INIT;
-			s->ops->eof(s->arg);
-			slot_freebufs(s);
-			dev_mix_adjvol(d);
+
 #ifdef DEBUG
 			logx(3, "slot%zu: drained", s - slot_array);
 #endif
+			slot_detach(s);
+			s->pstate = SLOT_INIT;
+			s->ops->eof(s->arg);
+			slot_freebufs(s);
 			continue;
 		}
 
@@ -636,13 +636,10 @@ dev_cycle(struct dev *d)
 			}
 			if (s->xrun == XRUN_IGNORE) {
 				s->delta -= s->round;
-				ps = &s->next;
 			} else if (s->xrun == XRUN_SYNC) {
 				s->skip++;
-				ps = &s->next;
 			} else if (s->xrun == XRUN_ERROR) {
 				s->ops->exit(s->arg);
-				*ps = s->next;
 			} else {
 #ifdef DEBUG
 				logx(0, "slot%zu: bad xrun mode", s - slot_array);
@@ -676,7 +673,6 @@ dev_cycle(struct dev *d)
 			if (s->pstate != SLOT_STOP)
 				s->ops->fill(s->arg);
 		}
-		ps = &s->next;
 	}
 	if ((d->mode & MODE_PLAY) && d->encbuf) {
 		enc_do(&d->enc, (unsigned char *)DEV_PBUF(d),
@@ -1618,6 +1614,7 @@ slot_detach(struct slot *s)
 			s->sub.encbuf = NULL;
 		}
 		if (s->sub.resampbuf) {
+			resamp_done(&s->sub.resamp);
 			xfree(s->sub.resampbuf);
 			s->sub.resampbuf = NULL;
 		}
@@ -1629,6 +1626,7 @@ slot_detach(struct slot *s)
 			s->mix.decbuf = NULL;
 		}
 		if (s->mix.resampbuf) {
+			resamp_done(&s->mix.resamp);
 			xfree(s->mix.resampbuf);
 			s->mix.resampbuf = NULL;
 		}
@@ -1746,8 +1744,8 @@ ctlslot_new(struct opt *o, struct midithru *t, struct ctlops *ops, void *arg)
 	s->self = 1 << i;
 	if (s->opt != NULL && !opt_ref(s->opt))
 		return NULL;
-	if (s->midithru)
-		midithru_ref(t);
+	if (s->midithru != NULL && !midithru_ref(s->midithru))
+		return NULL;
 	s->ops = ops;
 	s->arg = arg;
 	for (c = ctl_list; c != NULL; c = c->next) {
@@ -1886,11 +1884,11 @@ ctl_scope_fmt(char *buf, size_t size, struct ctl *c)
 		return snprintf(buf, size, "opt_mode:%s/%s",
 		    c->u.opt_mode.opt->name, opt_modes[c->u.opt_mode.idx].name);
 	case CTL_MIDI_PORT:
-		return snprintf(buf, size, "midi_port:%zu/%u",
-		    c->u.midi.midithru - midithru_array, c->u.midi.port->num);
+		return snprintf(buf, size, "midi_port:%s/%u",
+		    c->u.midi.midithru->name, c->u.midi.port->num);
 	case CTL_MIDI_THRU:
-		return snprintf(buf, size, "midi_thru:%zu",
-		    c->u.midi.midithru - midithru_array);
+		return snprintf(buf, size, "midi_thru:%s",
+		    c->u.midi.midithru->name);
 	default:
 		return snprintf(buf, size, "unknown");
 	}

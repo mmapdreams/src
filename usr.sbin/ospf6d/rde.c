@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.c,v 1.97 2024/11/21 13:38:14 claudio Exp $ */
+/*	$OpenBSD: rde.c,v 1.100 2026/08/17 08:59:08 claudio Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Claudio Jeker <claudio@openbsd.org>
@@ -272,9 +272,8 @@ rde_dispatch_imsg(int fd, short event, void *bula)
 	struct area		*area;
 	struct vertex		*v;
 	char			*buf;
-	ssize_t			 n;
 	time_t			 now;
-	int			 r, state, self, shut = 0, verbose;
+	int			 n, r, state, self, shut = 0, verbose;
 	u_int16_t		 l;
 
 	if (event & EV_READ) {
@@ -296,8 +295,8 @@ rde_dispatch_imsg(int fd, short event, void *bula)
 	now = tp.tv_sec;
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("rde_dispatch_imsg: imsg_get error");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("rde_dispatch_imsg: imsgbuf_get error");
 		if (n == 0)
 			break;
 
@@ -618,9 +617,11 @@ rde_dispatch_imsg(int fd, short event, void *bula)
 			orig_intra_area_prefix_lsas(nbr->area);
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
-			/* already checked by ospfe */
-			memcpy(&verbose, imsg.data, sizeof(verbose));
-			log_setverbose(verbose);
+			if (imsg_get_data(&imsg, &verbose, sizeof(verbose)) ==
+			    -1)
+				log_warn("wrong imsg len");
+			else
+				log_setverbose(verbose);
 			break;
 		default:
 			log_debug("rde_dispatch_imsg: unexpected imsg %d",
@@ -650,8 +651,7 @@ rde_dispatch_parent(int fd, short event, void *bula)
 	struct kroute		 kr;
 	struct imsgev		*iev = bula;
 	struct imsgbuf		*ibuf = &iev->ibuf;
-	ssize_t			 n;
-	int			 shut = 0, link_ok, prev_link_ok, orig_lsa;
+	int			 n, shut = 0, link_ok, prev_link_ok, orig_lsa;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -669,8 +669,8 @@ rde_dispatch_parent(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("rde_dispatch_parent: imsg_get error");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("rde_dispatch_parent: imsgbuf_get error");
 		if (n == 0)
 			break;
 

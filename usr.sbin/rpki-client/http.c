@@ -1,4 +1,4 @@
-/*	$OpenBSD: http.c,v 1.105 2026/06/26 08:05:22 tb Exp $ */
+/*	$OpenBSD: http.c,v 1.109 2026/08/05 19:15:22 claudio Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
@@ -1258,7 +1258,7 @@ http_request(struct http_connection *conn)
 
 /*
  * Parse the HTTP status line.
- * Return 0 for status codes 100, 103, 200, 203, 301-304, 307-308.
+ * Return 0 for status codes 200, 203, 301-304, 307-308.
  * The other 1xx and 2xx status codes are explicitly not handled and are
  * considered an error.
  * Failure codes and other errors return -1.
@@ -1305,9 +1305,6 @@ http_parse_status(struct http_connection *conn, char *buf)
 			return -1;
 		}
 		/* FALLTHROUGH */
-	case 100:	/* Informational: continue (ignored) */
-	case 103:	/* Informational: early hints (ignored) */
-		/* FALLTHROUGH */
 	case 200:	/* Success: OK */
 	case 203:	/* Success: non-authoritative information (proxy) */
 	case 304:	/* Redirect: not modified */
@@ -1320,6 +1317,18 @@ http_parse_status(struct http_connection *conn, char *buf)
 		return -1;
 	}
 
+	return 0;
+}
+
+/*
+ * Return true if the response should not contain a message-body.
+ */
+static inline int
+http_isbodyless(struct http_connection *conn)
+{
+	if ((conn->status >= 100 && conn->status <= 199) ||
+	    conn->status == 204 || conn->status == 205 || conn->status == 304)
+		return 1;
 	return 0;
 }
 
@@ -1387,8 +1396,24 @@ http_parse_header(struct http_connection *conn, char *buf)
 	if (*cp == '\0') {
 		/* check consistency of header fields */
 		if (http_isredirect(conn) && conn->redir_uri == NULL) {
-			warnx("%s: redirect with no location", conn->req->uri);
+			warnx("%s: redirect with no location",
+			    http_info(conn->req->uri));
 			return -1;
+		}
+		if (conn->iosz != 0 && conn->chunked) {
+			warnx("%s: mutually exclusive, Content-Length set with"
+			    "Transfer-Encoding: chunked", conn_info(conn));
+			return -1;
+		}
+		if (http_isbodyless(conn)) {
+			if (conn->bufpos != 0) {
+				/* no pipelining so no extra data */
+				warnx("%s: unexpected trailing data",
+				    conn_info(conn));
+				return -1;
+			}
+			conn->chunked = 0;
+			conn->iosz = 0;
 		}
 		return 0;
 	} else if (strncasecmp(cp, CONTENTLEN, sizeof(CONTENTLEN) - 1) == 0) {
@@ -1441,12 +1466,17 @@ http_parse_header(struct http_connection *conn, char *buf)
 		loctail = strchr(redirurl, '#');
 		if (loctail != NULL)
 			*loctail = '\0';
-		conn->redir_uri = redirurl;
 		if (!valid_origin(redirurl, conn->req->uri)) {
-			warnx("%s: cross origin redirect to %s", conn->req->uri,
-			    http_info(redirurl));
+			char redirbuf[200];
+
+			(void)strlcpy(redirbuf, http_info(redirurl),
+			    sizeof(redirbuf));
+			warnx("%s: cross origin redirect to %s",
+			    http_info(conn->req->uri), redirbuf);
+			free(redirurl);
 			return -1;
 		}
+		conn->redir_uri = redirurl;
 	} else if (strncasecmp(cp, TRANSFER_ENCODING,
 	    sizeof(TRANSFER_ENCODING) - 1) == 0) {
 		cp += sizeof(TRANSFER_ENCODING) - 1;

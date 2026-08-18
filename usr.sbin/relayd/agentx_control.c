@@ -1,4 +1,4 @@
-/*	$OpenBSD: agentx_control.c,v 1.9 2026/06/15 11:02:13 rsadowski Exp $	*/
+/*	$OpenBSD: agentx_control.c,v 1.12 2026/08/12 19:29:34 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2020 Martijn van Duren <martijn@openbsd.org>
@@ -427,9 +427,11 @@ agentx_init(struct relayd *nenv)
 void
 agentx_nofd(struct agentx *usa, void *cookie, int close)
 {
-	if (!close)
-		proc_compose(env->sc_ps, PROC_PARENT, IMSG_AGENTXSOCK, NULL, 0);
-	else {
+	if (!close) {
+		if (proc_compose(env->sc_ps, PROC_PARENT, IMSG_AGENTXSOCK,
+		    NULL, 0) == -1)
+			log_warn("%s: proc_compose", __func__);
+	} else {
 		sa = NULL;
 		agentx_init(env);
 		event_del(&(env->sc_agentxev));
@@ -456,7 +458,9 @@ agentx_setsock(struct relayd *lenv, enum privsep_procid id)
 		s = -1;
 	}
  done:
-	proc_compose_imsg(lenv->sc_ps, id, -1, IMSG_AGENTXSOCK, -1, s, NULL, 0);
+	if (proc_compose_imsg(lenv->sc_ps, id, -1, IMSG_AGENTXSOCK, -1, s,
+	    NULL, 0) == -1)
+		log_warn("%s: proc_compose_imsg", __func__);
 }
 
 void
@@ -485,7 +489,9 @@ void
 agentx_sock(int fd, short event, void *arg)
 {
 	if (event & EV_TIMEOUT) {
-		proc_compose(env->sc_ps, PROC_PARENT, IMSG_AGENTXSOCK, NULL, 0);
+		if (proc_compose(env->sc_ps, PROC_PARENT, IMSG_AGENTXSOCK,
+		    NULL, 0) == -1)
+			log_warn("%s: proc_compose", __func__);
 		return;
 	}
 	if (event & EV_WRITE) {
@@ -562,8 +568,6 @@ agentxctl_redirect(struct agentx_varbind *sav)
 			agentx_varbind_integer(sav, 1);
 		else if (rdr->conf.flags & F_DOWN)
 			agentx_varbind_integer(sav, 2);
-		else if (rdr->conf.flags & F_BACKUP)
-			agentx_varbind_integer(sav, 3);
 		else
 			agentx_varbind_integer(sav, 0);
 	} else if (agentx_varbind_get_object(sav) == relaydRedirectName)
@@ -1003,7 +1007,7 @@ snmp_element(const char *oidstr, enum snmp_type type, void *buf, int64_t val,
 	u_int64_t		 l;
 	struct snmp_oid		 oid;
 
-	DPRINTF("%s: oid %s type %d buf %p val %lld", __func__,
+	log_debug("%s: oid %s type %d buf %p val %lld", __func__,
 	    oidstr, type, buf, val);
 
 	if (snmp_string2oid(oidstr, &oid) == -1)

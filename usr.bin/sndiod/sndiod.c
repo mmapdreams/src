@@ -1,4 +1,4 @@
-/*	$OpenBSD: sndiod.c,v 1.58 2026/06/22 14:21:14 ratchov Exp $	*/
+/*	$OpenBSD: sndiod.c,v 1.61 2026/08/12 11:01:26 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -321,6 +321,26 @@ unsetsig(void)
 		err(1, "unsetsig(int): sigaction failed");
 }
 
+static int
+ckname(const char *name)
+{
+	size_t len;
+	char c;
+
+	for (len = 0; name[len] != '\0'; len++) {
+		if (len == CTL_NAMEMAX - 1) {
+			warnx("%s: too long", name);
+			return 0;
+		}
+		c = name[len];
+		if ((c < 'a' || c > 'z') && (c < 'A' || c > 'Z')) {
+			warnx("%s: only alphabetic chars allowed", name);
+			return 0;
+		}
+	}
+	return 1;
+}
+
 struct dev *
 mkdev(char *path, struct aparams *par, int hold, int autovol)
 {
@@ -359,6 +379,8 @@ mkopt(char *path, struct dev *d, struct opt_alt *alt_list,
 	struct opt *o;
 	struct opt_alt *a;
 
+	if (!ckname(path))
+		return NULL;
 	o = opt_new(d, path, pmin, pmax, rmin, rmax,
 	    MIDI_TO_ADATA(vol), mmc, dup, mode);
 	if (o == NULL)
@@ -615,10 +637,14 @@ main(int argc, char **argv)
 	}
 
 	/*
-	 * enable midithru by default
+	 * initialize midithru/N
 	 */
-	for (i = 0; i < MIDITHRU_NMAX; i++)
-		midithru_array[i].thru = 1;
+	for (i = 0; i < MIDITHRU_NMAX; i++) {
+		char name[CTL_NAMEMAX];
+
+		snprintf(name, sizeof(name), "default-%d", i);
+		midithru_new(name);
+	}
 
 	if (port_list == NULL) {
 		for (i = 0; default_ports[i] != NULL; i++)
@@ -646,7 +672,7 @@ main(int argc, char **argv)
 	 * the "default" sub-device as template
 	 */
 	for (d = dev_list; d != NULL; d = d->next) {
-		if (opt_new(d, NULL, o->pmin, o->pmax, o->rmin, o->rmax,
+		if (opt_new(d, d->name, o->pmin, o->pmax, o->rmin, o->rmax,
 			o->maxweight, o->mtc != NULL, o->dup, o->mode) == NULL)
 			return 1;
 		dev_adjpar(d, o->pmax, o->rmax);
@@ -747,6 +773,8 @@ main(int argc, char **argv)
 		dev_del(dev_list);
 	while (port_list)
 		port_del(port_list);
+	while (midithru_list)
+		midithru_del(midithru_list);
 	while (tcpaddr_list) {
 		ta = tcpaddr_list;
 		tcpaddr_list = ta->next;

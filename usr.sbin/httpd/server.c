@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.133 2026/07/02 04:59:16 rsadowski Exp $	*/
+/*	$OpenBSD: server.c,v 1.137 2026/07/26 14:46:32 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -48,17 +48,17 @@
 #define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
 
 int		 server_dispatch_parent(int, struct privsep_proc *,
-		    struct imsg *);
+    struct imsg *);
 int		 server_dispatch_logger(int, struct privsep_proc *,
-		    struct imsg *);
+    struct imsg *);
 void		 server_shutdown(void);
 
 void		 server_init(struct privsep *, struct privsep_proc *p, void *);
-void		 server_launch(void);
+int		 server_launch(void);
 int		 server_socket(struct sockaddr_storage *, in_port_t,
-		    struct server_config *, int, int);
+    struct server_config *, int, int);
 int		 server_socket_listen(struct sockaddr_storage *, in_port_t,
-		    struct server_config *);
+    struct server_config *);
 struct server	*server_byid(uint32_t);
 
 int		 server_tls_init(struct server *);
@@ -71,7 +71,7 @@ void		 server_input(struct client *);
 void		 server_inflight_dec(struct client *, const char *);
 
 extern void	 bufferevent_read_pressure_cb(struct evbuffer *, size_t,
-		    size_t, void *);
+    size_t, void *);
 
 volatile int server_clients;
 volatile int server_inflight = 0;
@@ -406,7 +406,7 @@ server_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 #endif
 }
 
-void
+int
 server_launch(void)
 {
 	struct server		*srv;
@@ -415,7 +415,8 @@ server_launch(void)
 		log_debug("%s: configuring server %s", __func__,
 		    srv->srv_conf.name);
 
-		server_tls_init(srv);
+		if (server_tls_init(srv) != 0)
+			return (-1);
 
 		log_debug("%s: running server %s", __func__,
 		    srv->srv_conf.name);
@@ -425,6 +426,7 @@ server_launch(void)
 		event_add(&srv->srv_ev, NULL);
 		evtimer_set(&srv->srv_evt, server_accept, srv);
 	}
+	return (0);
 }
 
 void
@@ -460,10 +462,23 @@ server_purge(struct server *srv)
 		}
 	}
 
+	server_headers_free(&srv->srv_conf.headers);
 	tls_config_free(srv->srv_tls_config);
 	tls_free(srv->srv_tls_ctx);
 
 	free(srv);
+}
+
+void
+server_headers_free(struct server_headers *headers)
+{
+	struct custom_header	*hdr, *thdr;
+
+	TAILQ_FOREACH_SAFE(hdr, headers, entry, thdr) {
+		free(hdr->name);
+		free(hdr->value);
+		free(hdr);
+	}
 }
 
 void
@@ -483,8 +498,12 @@ serverconfig_free(struct server_config *srv_conf)
 	freezero(srv_conf->tls_cert, srv_conf->tls_cert_len);
 	freezero(srv_conf->tls_key, srv_conf->tls_key_len);
 
-	TAILQ_FOREACH_SAFE(param, &srv_conf->fcgiparams, entry, tparam)
+	TAILQ_FOREACH_SAFE(param, &srv_conf->fcgiparams, entry, tparam) {
+		free(param->name);
+		free(param->value);
 		free(param);
+	}
+	server_headers_free(&srv_conf->headers);
 }
 
 void
@@ -503,6 +522,7 @@ serverconfig_reset(struct server_config *srv_conf)
 	srv_conf->tls_ocsp_staple = NULL;
 	srv_conf->tls_ocsp_staple_file = NULL;
 	TAILQ_INIT(&srv_conf->fcgiparams);
+	TAILQ_INIT(&srv_conf->headers);
 }
 
 struct server *
@@ -552,7 +572,7 @@ server_byid(uint32_t id)
 
 int
 server_foreach(int (*srv_cb)(struct server *,
-    struct server_config *, void *), void *arg)
+	struct server_config *, void *), void *arg)
 {
 	struct server		*srv;
 	struct server_config	*srv_conf;
@@ -1238,7 +1258,8 @@ server_sendlog(struct server_config *srv_conf, int cmd, const char *emsg, ...)
 void
 server_log(struct client *clt, const char *msg)
 {
-	char			 ibuf[HOST_NAME_MAX+1], obuf[HOST_NAME_MAX+1];
+	char			 ibuf[HOST_NAME_MAX + 1],
+				 obuf[HOST_NAME_MAX + 1];
 	struct server_config	*srv_conf = clt->clt_srv_conf;
 	char			*ptr = NULL, *vmsg = NULL;
 	int			 debug_cmd = -1;
@@ -1342,37 +1363,53 @@ server_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 
 	switch (imsg->hdr.type) {
 	case IMSG_CFG_MEDIA:
-		config_getmedia(httpd_env, imsg);
+		if (config_getmedia(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_AUTH:
-		config_getauth(httpd_env, imsg);
+		if (config_getauth(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_SERVER:
-		config_getserver(httpd_env, imsg);
+		if (config_getserver(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_TLS:
-		config_getserver_tls(httpd_env, imsg);
+		if (config_getserver_tls(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_FCGI:
-		config_getserver_fcgiparams(httpd_env, imsg);
+		if (config_getserver_fcgiparams(httpd_env, imsg) != 0)
+			return (-1);
+		break;
+	case IMSG_CFG_HEADERS:
+		if (config_getserver_headers(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CFG_DONE:
-		config_getcfg(httpd_env, imsg);
+		if (config_getcfg(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_CTL_START:
-		server_launch();
+		if (server_launch() != 0)
+			return (-1);
 		break;
 	case IMSG_CTL_RESET:
-		config_getreset(httpd_env, imsg);
+		if (config_getreset(httpd_env, imsg) != 0)
+			return (-1);
 		break;
 	case IMSG_TLSTICKET_REKEY:
 		IMSG_SIZE_CHECK(imsg, (&key));
 		memcpy(&key, imsg->data, sizeof(key));
 		/* apply to the right server */
-		srv = server_byid(key.tt_id);
-		if (srv) {
-			tls_config_add_ticket_key(srv->srv_tls_config,
-			    key.tt_keyrev, key.tt_key, sizeof(key.tt_key));
+		if ((srv = server_byid(key.tt_id)) == NULL) {
+			log_debug("%s: invalid sever id", __func__);
+			return (-1);
+		}
+		if (tls_config_add_ticket_key(srv->srv_tls_config,
+		    key.tt_keyrev, key.tt_key, sizeof(key.tt_key)) == -1) {
+			log_debug("%s: tls_config_add_ticket_key", __func__);
+			return (-1);
 		}
 		break;
 	default:

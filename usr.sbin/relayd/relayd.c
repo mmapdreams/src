@@ -1,4 +1,4 @@
-/*	$OpenBSD: relayd.c,v 1.203 2026/07/01 18:11:44 martijn Exp $	*/
+/*	$OpenBSD: relayd.c,v 1.208 2026/08/12 19:29:34 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -70,6 +70,8 @@ void		 parent_tls_ticket_rekey(int, short, void *);
 
 struct relayd			*relayd_env;
 
+static int			 cli_verbose;
+
 static struct privsep_proc procs[] = {
 	{ "pfe",	PROC_PFE, parent_dispatch_pfe, pfe },
 	{ "hce",	PROC_HCE, parent_dispatch_hce, hce },
@@ -121,7 +123,7 @@ int
 main(int argc, char *argv[])
 {
 	int			 c;
-	int			 debug = 0, verbose = 0;
+	int			 debug = 0;
 	u_int32_t		 opts = 0;
 	struct relayd		*env;
 	struct privsep		*ps;
@@ -149,7 +151,7 @@ main(int argc, char *argv[])
 			conffile = optarg;
 			break;
 		case 'v':
-			verbose++;
+			cli_verbose = 1;
 			opts |= RELAYD_OPT_VERBOSE;
 			break;
 		case 'P':
@@ -197,6 +199,10 @@ main(int argc, char *argv[])
 	if (debug)
 		env->sc_conf.opts |= RELAYD_OPT_LOGUPDATE;
 
+	/* CLI always wins over log level form config. */
+	if (cli_verbose)
+		env->sc_conf.opts |= RELAYD_OPT_VERBOSE;
+
 	if (geteuid())
 		errx(1, "need root privileges");
 
@@ -204,7 +210,7 @@ main(int argc, char *argv[])
 		errx(1, "unknown user %s", RELAYD_USER);
 
 	log_init(debug, LOG_DAEMON);
-	log_setverbose(verbose);
+	log_setverbose(env->sc_conf.opts & RELAYD_OPT_VERBOSE ? 2 : 0);
 
 	if (env->sc_conf.opts & RELAYD_OPT_NOACTION)
 		ps->ps_noaction = 1;
@@ -311,11 +317,16 @@ parent_configure(struct relayd *env)
 	/* HCE, PFE, CA and the relays need to reload their config. */
 	env->sc_reload = 2 + (2 * env->sc_conf.prefork_relay);
 
+	/* CLI always wins over log level form config. */
+	if (cli_verbose)
+		env->sc_conf.opts |= RELAYD_OPT_VERBOSE;
+
 	for (id = 0; id < PROC_MAX; id++) {
 		if (id == privsep_process)
 			continue;
-		proc_compose_imsg(env->sc_ps, id, -1, IMSG_CFG_DONE, -1,
-		    -1, &env->sc_conf, sizeof(env->sc_conf));
+		if (proc_compose_imsg(env->sc_ps, id, -1, IMSG_CFG_DONE, -1,
+		    -1, &env->sc_conf, sizeof(env->sc_conf)) == -1)
+			fatal("%s: proc_compose_imsg", __func__);
 	}
 
 	ret = 0;
@@ -343,14 +354,14 @@ parent_reload(struct relayd *env, u_int reset, const char *filename)
 
 	if (reset == CONFIG_RELOAD) {
 		if (load_config(filename, env) == -1) {
-			log_debug("%s: failed to load config file %s",
+			log_warn("%s: failed to load config file %s",
 			    __func__, filename);
 		}
 
 		config_setreset(env, CONFIG_ALL);
 
 		if (parent_configure(env) == -1) {
-			log_debug("%s: failed to commit config from %s",
+			log_warn("%s: failed to commit config from %s",
 			    __func__, filename);
 		}
 	} else
@@ -373,7 +384,9 @@ parent_configure_done(struct relayd *env)
 			if (id == privsep_process)
 				continue;
 
-			proc_compose(env->sc_ps, id, IMSG_CTL_START, NULL, 0);
+			if (proc_compose(env->sc_ps, id, IMSG_CTL_START, NULL,
+			    0) == -1)
+				fatal("%s: proc_compose", __func__);
 		}
 	}
 }
@@ -407,14 +420,15 @@ parent_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 	char			*str = NULL;
 	size_t			 s;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_DEMOTE:
 		if (imsg_get_data(imsg, &demote, sizeof(demote)) == -1) {
 			log_warn("%s: imsg_get_data", __func__);
 			return (-1);
 		}
 		demote.group[sizeof(demote.group) - 1] = '\0';
-		carp_demote_set(demote.group, demote.level);
+		if (carp_demote_set(demote.group, demote.level) != 0)
+			return (-1);
 		break;
 	case IMSG_RTMSG:
 		if (imsg_get_data(imsg, &crt, sizeof(crt)) == -1) {
@@ -424,7 +438,8 @@ parent_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		crt.host.name[sizeof(crt.host.name) - 1] = '\0';
 		crt.rt.name[sizeof(crt.rt.name) - 1] = '\0';
 		crt.rt.label[sizeof(crt.rt.label) - 1] = '\0';
-		pfe_route(env, &crt);
+		if (pfe_route(env, &crt) != 0)
+			return (-1);
 		break;
 	case IMSG_CTL_RESET:
 		if (imsg_get_data(imsg, &v, sizeof(v)) == -1) {
@@ -467,7 +482,7 @@ parent_dispatch_hce(int fd, struct privsep_proc *p, struct imsg *imsg)
 	struct relayd		*env = ps->ps_env;
 	struct ctl_script	 scr;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_SCRIPT:
 		if (imsg_get_data(imsg, &scr, sizeof(scr)) == -1) {
 			log_warn("%s: imsg_get_data", __func__);
@@ -476,7 +491,9 @@ parent_dispatch_hce(int fd, struct privsep_proc *p, struct imsg *imsg)
 		scr.name[sizeof(scr.name) - 1] = '\0';
 		scr.path[sizeof(scr.path) - 1] = '\0';
 		scr.retval = script_exec(env, &scr);
-		proc_compose(ps, PROC_HCE, IMSG_SCRIPT, &scr, sizeof(scr));
+		if (proc_compose(ps, PROC_HCE, IMSG_SCRIPT, &scr,
+		    sizeof(scr)) == -1)
+			log_warn("%s: proc_compose", __func__);
 		break;
 	case IMSG_CFG_DONE:
 		parent_configure_done(env);
@@ -496,7 +513,7 @@ parent_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 	struct ctl_bindany	 bnd;
 	int			 s;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_BINDANY:
 		if (imsg_get_data(imsg, &bnd, sizeof(bnd)) == -1) {
 			log_warn("%s: imsg_get_data", __func__);
@@ -516,8 +533,9 @@ parent_dispatch_relay(int fd, struct privsep_proc *p, struct imsg *imsg)
 			/* NOTREACHED */
 		}
 		s = bindany(&bnd);
-		proc_compose_imsg(ps, PROC_RELAY, bnd.bnd_proc,
-		    IMSG_BINDANY, -1, s, &bnd.bnd_id, sizeof(bnd.bnd_id));
+		if (proc_compose_imsg(ps, PROC_RELAY, bnd.bnd_proc,
+		    IMSG_BINDANY, -1, s, &bnd.bnd_id, sizeof(bnd.bnd_id)) == -1)
+			log_warn("%s: proc_compose_imsg", __func__);
 		break;
 	case IMSG_CFG_DONE:
 		parent_configure_done(env);
@@ -535,7 +553,7 @@ parent_dispatch_ca(int fd, struct privsep_proc *p, struct imsg *imsg)
 	struct privsep		*ps = p->p_ps;
 	struct relayd		*env = ps->ps_env;
 
-	switch (imsg->hdr.type) {
+	switch (imsg_get_type(imsg)) {
 	case IMSG_CFG_DONE:
 		parent_configure_done(env);
 		break;
@@ -876,10 +894,8 @@ kv_find_value(struct kvtree *keys, char *key, const char *value,
 	/* not matched */
 	match = NULL;
  done:
-#ifdef DEBUG
 	if (match != NULL)
-		DPRINTF("%s: matched %s: %s", __func__, key, value);
-#endif
+		log_debug("%s: matched %s: %s", __func__, key, value);
 	free(val);
 	return (match);
 }
@@ -1178,12 +1194,12 @@ table_findbyconf(struct relayd *env, struct table *tb)
 
 	bcopy(&tb->conf, &a, sizeof(a));
 	a.id = a.rdrid = 0;
-	a.flags &= ~(F_USED|F_BACKUP);
+	a.flags &= ~F_USED;
 
 	TAILQ_FOREACH(table, env->sc_tables, entry) {
 		bcopy(&table->conf, &b, sizeof(b));
 		b.id = b.rdrid = 0;
-		b.flags &= ~(F_USED|F_BACKUP);
+		b.flags &= ~F_USED;
 
 		/*
 		 * Compare two tables and return the existing table if
@@ -1514,7 +1530,6 @@ expand_string(char *label, size_t len, const char *srch, const char *repl)
 	char *p, *q;
 
 	if ((tmp = calloc(1, len)) == NULL) {
-		log_debug("%s: calloc", __func__);
 		return (-1);
 	}
 	p = label;
@@ -1522,7 +1537,7 @@ expand_string(char *label, size_t len, const char *srch, const char *repl)
 		*q = '\0';
 		if ((strlcat(tmp, p, len) >= len) ||
 		    (strlcat(tmp, repl, len) >= len)) {
-			log_debug("%s: string too long", __func__);
+			log_warn("%s: string too long", __func__);
 			free(tmp);
 			return (-1);
 		}
@@ -1530,7 +1545,7 @@ expand_string(char *label, size_t len, const char *srch, const char *repl)
 		p = q;
 	}
 	if (strlcat(tmp, p, len) >= len) {
-		log_debug("%s: string too long", __func__);
+		log_warn("%s: string too long", __func__);
 		free(tmp);
 		return (-1);
 	}
@@ -1667,7 +1682,7 @@ parse_url(const char *url, char **protoptr, char **hostptr, char **pathptr)
 	/* strip path after host */
 	host[strcspn(host, "/")] = '\0';
 
-	DPRINTF("%s: %s proto %s, host %s, path %s", __func__,
+	log_debug("%s: %s proto %s, host %s, path %s", __func__,
 	    url, proto, host, path);
 
 	*protoptr = proto;
@@ -1911,7 +1926,8 @@ accept_reserve(int sockfd, struct sockaddr *addr, socklen_t *addrlen,
 
 	if ((ret = accept4(sockfd, addr, addrlen, SOCK_NONBLOCK)) > -1) {
 		(*counter)++;
-		DPRINTF("%s: inflight incremented, now %d", __func__, *counter);
+		log_debug("%s: inflight incremented, now %d", __func__,
+		    *counter);
 	}
 	return (ret);
 }
@@ -1924,13 +1940,14 @@ parent_tls_ticket_rekey(int fd, short events, void *arg)
 	struct timeval		 tv;
 	struct relay_ticket_key	 key;
 
-	log_debug("%s: rekeying tickets", __func__);
+	DPRINTF("%s: rekeying tickets", __func__);
 
 	key.tt_keyrev = arc4random();
 	arc4random_buf(key.tt_key, sizeof(key.tt_key));
 
-	proc_compose_imsg(env->sc_ps, PROC_RELAY, -1, IMSG_TLSTICKET_REKEY,
-	    -1, -1, &key, sizeof(key));
+	if (proc_compose_imsg(env->sc_ps, PROC_RELAY, -1, IMSG_TLSTICKET_REKEY,
+	    -1, -1, &key, sizeof(key)) == -1)
+		log_warn("%s: proc_compose_imsg", __func__);
 
 	evtimer_set(&rekeyev, parent_tls_ticket_rekey, env);
 	timerclear(&tv);

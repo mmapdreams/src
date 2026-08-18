@@ -245,6 +245,7 @@
 ./etc/rc.d/ldattach
 ./etc/rc.d/ldomd
 ./etc/rc.d/ldpd
+./etc/rc.d/lldpd
 ./etc/rc.d/lockd
 ./etc/rc.d/lpd
 ./etc/rc.d/mopd
@@ -305,10 +306,6 @@
 ./etc/rpki/ripe.tal
 ./etc/services
 ./etc/signify
-./etc/signify/openbsd-72-base.pub
-./etc/signify/openbsd-72-fw.pub
-./etc/signify/openbsd-72-pkg.pub
-./etc/signify/openbsd-72-syspatch.pub
 ./etc/signify/openbsd-73-base.pub
 ./etc/signify/openbsd-73-fw.pub
 ./etc/signify/openbsd-73-pkg.pub
@@ -341,6 +338,10 @@
 ./etc/signify/openbsd-80-fw.pub
 ./etc/signify/openbsd-80-pkg.pub
 ./etc/signify/openbsd-80-syspatch.pub
+./etc/signify/openbsd-81-base.pub
+./etc/signify/openbsd-81-fw.pub
+./etc/signify/openbsd-81-pkg.pub
+./etc/signify/openbsd-81-syspatch.pub
 ./etc/skel
 ./etc/skel/.ssh
 ./etc/ssh
@@ -468,6 +469,7 @@
 ./usr/bin/compress
 ./usr/bin/corelist
 ./usr/bin/cpan
+./usr/bin/cpp
 ./usr/bin/crontab
 ./usr/bin/csplit
 ./usr/bin/ctags
@@ -764,7 +766,7 @@
 ./usr/lib/libcurses.so.16.0
 ./usr/lib/libedit.so.7.0
 ./usr/lib/libelf.so.3.0
-./usr/lib/libevent.so.4.1
+./usr/lib/libevent.so.5.0
 ./usr/lib/libexecinfo.so.4.0
 ./usr/lib/libexpat.so.17.1
 ./usr/lib/libfido2.so.8.0
@@ -2734,7 +2736,6 @@
 ./usr/libexec/auth/login_token
 ./usr/libexec/auth/login_yubikey
 ./usr/libexec/comsat
-./usr/libexec/cpp
 ./usr/libexec/cvs
 ./usr/libexec/cvs/contrib
 ./usr/libexec/cvs/contrib/clmerge
@@ -3156,7 +3157,6 @@
 ./usr/share/man/man2/armv7
 ./usr/share/man/man2/i386
 ./usr/share/man/man3
-./usr/share/man/man3/loongson
 ./usr/share/man/man3/octeon
 ./usr/share/man/man3p
 ./usr/share/man/man3p/OpenBSD::BaseState.3p
@@ -3167,7 +3167,6 @@
 ./usr/share/man/man4/hppa
 ./usr/share/man/man4/i386
 ./usr/share/man/man4/landisk
-./usr/share/man/man4/loongson
 ./usr/share/man/man4/luna88k
 ./usr/share/man/man4/macppc
 ./usr/share/man/man4/octeon
@@ -3189,7 +3188,6 @@
 ./usr/share/man/man8/hppa
 ./usr/share/man/man8/i386
 ./usr/share/man/man8/landisk
-./usr/share/man/man8/loongson
 ./usr/share/man/man8/luna88k
 ./usr/share/man/man8/macppc
 ./usr/share/man/man8/octeon

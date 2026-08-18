@@ -1,4 +1,4 @@
-/*	$OpenBSD: opt.c,v 1.21 2026/06/24 14:54:50 ratchov Exp $	*/
+/*	$OpenBSD: opt.c,v 1.27 2026/08/12 11:03:19 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2011 Alexandre Ratchov <alex@caoua.org>
  *
@@ -47,7 +47,7 @@ struct app *
 opt_mkapp(struct opt *o, char *who)
 {
 	char *p;
-	char name[APP_NAMEMAX];
+	char name[CTL_NAMEMAX];
 	unsigned int i, ser, bestser, bestidx, inuse;
 	struct app *a;
 	struct slot *s;
@@ -56,7 +56,7 @@ opt_mkapp(struct opt *o, char *who)
 	 * create a valid control name (lowcase, remove [^a-z], truncate)
 	 */
 	for (i = 0, p = who; ; p++) {
-		if (i == APP_NAMEMAX - 1 || *p == '\0') {
+		if (i == CTL_NAMEMAX - 1 || *p == '\0') {
 			name[i] = '\0';
 			break;
 		} else if (*p >= 'A' && *p <= 'Z') {
@@ -65,7 +65,7 @@ opt_mkapp(struct opt *o, char *who)
 			name[i++] = *p;
 	}
 	if (i == 0)
-		strlcpy(name, "noname", APP_NAMEMAX);
+		strlcpy(name, "noname", CTL_NAMEMAX);
 
 	/*
 	 * return the app with this name (if any)
@@ -321,35 +321,8 @@ opt_new(struct dev *d, char *name,
     int pmin, int pmax, int rmin, int rmax,
     int maxweight, int mmc, int dup, unsigned int mode)
 {
-	struct opt *o, **po;
+	struct opt *o;
 	char str[64];
-	unsigned int len, num;
-	char c;
-
-	if (name == NULL) {
-		name = d->name;
-		len = strlen(name);
-	} else {
-		for (len = 0; name[len] != '\0'; len++) {
-			if (len == OPT_NAMEMAX) {
-				logx(0, "%s: too long", name);
-				return NULL;
-			}
-			c = name[len];
-			if ((c < 'a' || c > 'z') &&
-			    (c < 'A' || c > 'Z')) {
-				logx(0, "%s: only alphabetic chars allowed", name);
-				return NULL;
-			}
-		}
-	}
-	num = 0;
-	for (po = &opt_list; *po != NULL; po = &(*po)->next)
-		num++;
-	if (num >= OPT_NMAX) {
-		logx(0, "%s: too many opts", name);
-		return NULL;
-	}
 
 	if (opt_byname(name)) {
 		logx(1, "%s: already defined", name);
@@ -366,7 +339,6 @@ opt_new(struct dev *d, char *name,
 	}
 
 	o = xmalloc(sizeof(struct opt));
-	o->num = num;
 	o->dev = d;
 	o->alt_list = NULL;
 	o->refcnt = 0;
@@ -380,7 +352,8 @@ opt_new(struct dev *d, char *name,
 	 *	allocated
 	 */
 	o->midi = midi_new(&opt_midiops, o, MODE_MIDIIN | MODE_MIDIOUT);
-	midithru_addprog(midithru_array + o->num, o->midi);
+	o->midithru = midithru_new("");
+	midithru_addprog(o->midithru, o->midi);
 
 	o->pmin = pmin;
 	o->pmax = pmax;
@@ -390,10 +363,10 @@ opt_new(struct dev *d, char *name,
 	o->mtc = mmc ? &mtc_array[0] : NULL;
 	o->dup = dup;
 	o->mode = mode;
-	memcpy(o->name, name, len + 1);
+	strlcpy(o->name, name, sizeof(o->name));
 	opt_setalt(o, d);
-	o->next = *po;
-	*po = o;
+	o->next = opt_list;
+	opt_list = o;
 
 	logx(2, "%s: %s%s, vol = %d", o->name, (chans_fmt(str, sizeof(str),
 	    o->mode, o->pmin, o->pmax, o->rmin, o->rmax), str),
@@ -448,18 +421,6 @@ opt_byname(char *name)
 	return NULL;
 }
 
-struct opt *
-opt_bynum(int num)
-{
-	struct opt *o;
-
-	for (o = opt_list; o != NULL; o = o->next) {
-		if (o->num == num)
-			return o;
-	}
-	return NULL;
-}
-
 void
 opt_del(struct opt *o)
 {
@@ -474,6 +435,7 @@ opt_del(struct opt *o)
 		}
 #endif
 	}
+	midithru_del(o->midithru);
 	midi_del(o->midi);
 	while ((a = o->alt_list) != NULL) {
 		o->alt_list = a->next;
@@ -505,6 +467,9 @@ opt_done(struct opt *o)
 		// XXX: all clients are already kicked, so this never happens
 		logx(0, "%s: still has refs", o->name);
 	}
+
+	for (i = 0; i < OPT_NAPP; i++)
+		ctl_del(CTL_APP_LEVEL, o, o->app_array + i);
 
 	for (i = 0; i < sizeof(opt_modes) / sizeof(opt_modes[0]); i++)
 		ctl_del(CTL_OPT_MODE, o, &i);

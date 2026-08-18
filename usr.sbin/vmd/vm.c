@@ -1,4 +1,4 @@
-/*	$OpenBSD: vm.c,v 1.124 2026/02/18 22:28:19 dv Exp $	*/
+/*	$OpenBSD: vm.c,v 1.127 2026/08/04 19:12:14 claudio Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -89,7 +89,7 @@ vm_main(int fd, int fd_vmm)
 	/*
 	 * The vm process relies on global state. Set the fd for /dev/vmm.
 	 */
-	env->vmd_fd = fd_vmm;
+	env->vmd_vmm_fd = fd_vmm;
 
 	/*
 	 * We aren't root, so we can't chroot(2). Use unveil(2) instead.
@@ -312,8 +312,7 @@ vm_dispatch_vmm(int fd, short event, void *arg)
 	struct imsg		 imsg;
 	uint32_t		 id, type;
 	pid_t			 pid;
-	ssize_t			 n;
-	int			 verbose;
+	int			 n, verbose;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -331,8 +330,8 @@ vm_dispatch_vmm(int fd, short event, void *arg)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get", __func__);
 		if (n == 0)
 			break;
 
@@ -507,7 +506,7 @@ vcpu_reset(uint32_t vmid, uint32_t vcpu_id, struct vcpu_reg_state *vrs)
 
 	log_debug("%s: resetting vcpu %d for vm %d", __func__, vcpu_id, vmid);
 
-	if (ioctl(env->vmd_fd, VMM_IOC_RESETCPU, &vrp) == -1)
+	if (ioctl(env->vmd_vmm_fd, VMM_IOC_RESETCPU, &vrp) == -1)
 		return (errno);
 
 	return (0);
@@ -557,7 +556,7 @@ vmm_create_vm(struct vmd_vm *vm)
 	vcp.vcp_sev = vmc->vmc_sev;
 	vcp.vcp_seves = vmc->vmc_seves;
 
-	if (ioctl(env->vmd_fd, VMM_IOC_CREATE, &vcp) == -1)
+	if (ioctl(env->vmd_vmm_fd, VMM_IOC_CREATE, &vcp) == -1)
 		return (errno);
 
 	vm->vm_vmmid = vcp.vcp_id;
@@ -894,7 +893,7 @@ vcpu_run_loop(void *arg)
 		/* Still more interrupts pending? */
 		vrp->vrp_intr_pending = intr_pending(current_vm);
 
-		if (ioctl(env->vmd_fd, VMM_IOC_RUN, vrp) == -1) {
+		if (ioctl(env->vmd_vmm_fd, VMM_IOC_RUN, vrp) == -1) {
 			/* If run ioctl failed, exit */
 			ret = errno;
 			log_warn("%s: vm %d / vcpu %d run ioctl failed",
@@ -941,7 +940,7 @@ vcpu_intr(uint32_t vmm_id, uint32_t vcpu_id, uint8_t intr)
 	vip.vip_vcpu_id = vcpu_id; /* XXX always 0? */
 	vip.vip_intr = intr;
 
-	if (ioctl(env->vmd_fd, VMM_IOC_INTR, &vip) == -1)
+	if (ioctl(env->vmd_vmm_fd, VMM_IOC_INTR, &vip) == -1)
 		return (errno);
 
 	return (0);
@@ -1059,7 +1058,7 @@ vm_pipe_init2(struct vm_dev_pipe *p, void (*cb)(int, short, void *), void *arg)
 void
 vm_pipe_send(struct vm_dev_pipe *p, enum pipe_msg_type msg)
 {
-	size_t n;
+	ssize_t n;
 	n = write(p->write, &msg, sizeof(msg));
 	if (n != sizeof(msg))
 		fatal("failed to write to device pipe");

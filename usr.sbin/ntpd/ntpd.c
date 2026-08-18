@@ -1,4 +1,4 @@
-/*	$OpenBSD: ntpd.c,v 1.145 2026/04/22 13:54:50 henning Exp $ */
+/*	$OpenBSD: ntpd.c,v 1.147 2026/08/04 19:05:21 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -391,16 +391,15 @@ int
 dispatch_imsg(struct ntpd_conf *lconf, int argc, char **argv)
 {
 	struct imsg		 imsg;
-	int			 n;
+	int			 n, synced;
 	double			 d;
 
 	if (imsgbuf_read(ibuf) != 1)
 		return (-1);
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
 			return (-1);
-
 		if (n == 0)
 			break;
 
@@ -409,11 +408,11 @@ dispatch_imsg(struct ntpd_conf *lconf, int argc, char **argv)
 			if (imsg.hdr.len != IMSG_HEADER_SIZE + sizeof(d))
 				fatalx("invalid IMSG_ADJTIME received");
 			memcpy(&d, imsg.data, sizeof(d));
-			n = ntpd_adjtime(d);
-			if (n == -1)
+			synced = ntpd_adjtime(d);
+			if (synced == -1)
 				fatalx("IMSG_ADJTIME with invalid value");
 			imsg_compose(ibuf, IMSG_ADJTIME, 0, 0, -1,
-			     &n, sizeof(n));
+			     &synced, sizeof(synced));
 			break;
 		case IMSG_ADJFREQ:
 			if (imsg.hdr.len != IMSG_HEADER_SIZE + sizeof(d))
@@ -713,8 +712,8 @@ ctl_main(int argc, char *argv[])
 			errx(1, "pipe closed");
 
 		while (!done) {
-			if ((n = imsg_get(ibuf_ctl, &imsg)) == -1)
-				err(1, "ibuf_ctl: imsg_get error");
+			if ((n = imsgbuf_get(ibuf_ctl, &imsg)) == -1)
+				err(1, "ibuf_ctl: imsgbuf_get error");
 			if (n == 0)
 				break;
 

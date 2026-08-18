@@ -1,4 +1,4 @@
-/* $OpenBSD: d1_both.c,v 1.97 2026/06/06 15:28:14 jsing Exp $ */
+/* $OpenBSD: d1_both.c,v 1.99 2026/07/16 14:43:22 jsing Exp $ */
 /*
  * DTLS implementation written by Nagendra Modadugu
  * (nagendra@cs.stanford.edu) for the OpenSSL project 2005.
@@ -354,18 +354,19 @@ dtls1_do_write_handshake_message(SSL *s)
 static int
 dtls1_do_write_ccs(SSL *s)
 {
+	const uint8_t ccs[] = { SSL3_MT_CCS };
 	int ret;
 
 	OPENSSL_assert(s->d1->mtu >= dtls1_min_mtu());
 
 	if ((ret = dtls1_write_bytes(s, SSL3_RT_CHANGE_CIPHER_SPEC,
-	    &s->init_buf->data[s->init_off], s->init_num)) < 0)
+	    ccs, sizeof(ccs))) < 0)
 		return -1;
 
-	OPENSSL_assert(s->init_num == ret);
+	OPENSSL_assert(sizeof(ccs) == ret);
 
 	ssl_msg_callback(s, 1, SSL3_RT_CHANGE_CIPHER_SPEC,
-	    s->init_buf->data, s->init_num);
+	    ccs, sizeof(ccs));
 
 	s->init_off = 0;
 	s->init_num = 0;
@@ -941,7 +942,7 @@ dtls1_retransmit_message(SSL *s, hm_fragment *frag)
 	    frag->msg_header.msg_len + header_length);
 	s->init_num = frag->msg_header.msg_len + header_length;
 
-	dtls1_set_message_header_int(s, frag->msg_header.type,
+	dtls1_set_message_header(s, frag->msg_header.type,
 	    frag->msg_header.msg_len, frag->msg_header.seq, 0,
 	    frag->msg_header.frag_len);
 
@@ -1057,21 +1058,6 @@ dtls1_clear_record_buffer(SSL *s)
 
 void
 dtls1_set_message_header(SSL *s, unsigned char mt, unsigned long len,
-    unsigned long frag_off, unsigned long frag_len)
-{
-	/* Don't change sequence numbers while listening */
-	if (frag_off == 0 && !s->d1->listen) {
-		s->d1->handshake_write_seq = s->d1->next_handshake_write_seq;
-		s->d1->next_handshake_write_seq++;
-	}
-
-	dtls1_set_message_header_int(s, mt, len, s->d1->handshake_write_seq,
-	    frag_off, frag_len);
-}
-
-/* don't actually do the writing, wait till the MTU has been retrieved */
-void
-dtls1_set_message_header_int(SSL *s, unsigned char mt, unsigned long len,
     unsigned short seq_num, unsigned long frag_off, unsigned long frag_len)
 {
 	struct hm_header_st *msg_hdr = &s->d1->w_msg_hdr;
@@ -1166,10 +1152,7 @@ dtls1_get_message_header(CBS *header, struct hm_header_st *msg_hdr)
 int
 dtls12_ccs_built(SSL *s)
 {
-	s->d1->handshake_write_seq = s->d1->next_handshake_write_seq;
-
-	dtls1_set_message_header_int(s, SSL3_MT_CCS, 0,
-	    s->d1->handshake_write_seq, 0, 0);
+	dtls1_set_message_header(s, SSL3_MT_CCS, 0, 0, 0, 0);
 
 	if (!dtls1_buffer_message(s, 1))
 		return 0;
@@ -1195,7 +1178,14 @@ dtls12_handshake_msg_built(SSL *s)
 
 	len = s->init_num - DTLS1_HM_HEADER_LENGTH;
 
-	dtls1_set_message_header(s, msg_type, len, 0, len);
+	/* Do not change sequence numbers while listening. */
+	if (!s->d1->listen) {
+		s->d1->handshake_write_seq = s->d1->next_handshake_write_seq;
+		s->d1->next_handshake_write_seq++;
+	}
+
+	dtls1_set_message_header(s, msg_type, len, s->d1->handshake_write_seq,
+	    0, len);
 
 	if (!dtls1_buffer_message(s, 0))
 		return 0;

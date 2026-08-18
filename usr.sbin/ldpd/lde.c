@@ -1,4 +1,4 @@
-/*	$OpenBSD: lde.c,v 1.84 2024/11/21 13:38:14 claudio Exp $ */
+/*	$OpenBSD: lde.c,v 1.87 2026/08/17 09:00:19 claudio Exp $ */
 
 /*
  * Copyright (c) 2013, 2016 Renato Westphal <renato@openbsd.org>
@@ -196,8 +196,7 @@ lde_dispatch_imsg(int fd, short event, void *bula)
 	struct map		 map;
 	struct lde_addr		 lde_addr;
 	struct notify_msg	 nm;
-	ssize_t			 n;
-	int			 shut = 0, verbose;
+	int			 n, shut = 0, verbose;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -215,8 +214,8 @@ lde_dispatch_imsg(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("lde_dispatch_imsg: imsg_get error");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("lde_dispatch_imsg: imsgbuf_get error");
 		if (n == 0)
 			break;
 
@@ -358,9 +357,11 @@ lde_dispatch_imsg(int fd, short event, void *bula)
 			    imsg.hdr.pid, NULL, 0);
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
-			/* already checked by ldpe */
-			memcpy(&verbose, imsg.data, sizeof(verbose));
-			log_verbose(verbose);
+			if (imsg_get_data(&imsg, &verbose, sizeof(verbose)) ==
+			    -1)
+				log_warn("wrong imsg len");
+			else
+				log_verbose(verbose);
 			break;
 		default:
 			log_debug("%s: unexpected imsg %d", __func__,
@@ -392,8 +393,7 @@ lde_dispatch_parent(int fd, short event, void *bula)
 	struct kroute		 kr;
 	struct imsgev		*iev = bula;
 	struct imsgbuf		*ibuf = &iev->ibuf;
-	ssize_t			 n;
-	int			 shut = 0;
+	int			 n, shut = 0;
 	struct fec		 fec;
 
 	if (event & EV_READ) {
@@ -412,8 +412,8 @@ lde_dispatch_parent(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("lde_dispatch_parent: imsg_get error");
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("lde_dispatch_parent: imsgbuf_get error");
 		if (n == 0)
 			break;
 

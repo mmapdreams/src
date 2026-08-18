@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_amap.c,v 1.99 2026/06/18 13:14:26 kirill Exp $	*/
+/*	$OpenBSD: uvm_amap.c,v 1.101 2026/08/12 14:49:25 gnezdo Exp $	*/
 /*	$NetBSD: uvm_amap.c,v 1.27 2000/11/25 06:27:59 chs Exp $	*/
 
 /*
@@ -105,13 +105,15 @@ amap_list_remove(struct vm_amap *amap)
 struct vm_amap_chunk *
 amap_chunk_get(struct vm_amap *amap, int slot, int create, int waitf)
 {
-	int bucket = UVM_AMAP_BUCKET(amap, slot);
-	int baseslot = AMAP_BASE_SLOT(slot);
+	int bucket, baseslot;
 	int n;
 	struct vm_amap_chunk *chunk, *newchunk, *pchunk = NULL;
 
 	if (UVM_AMAP_SMALL(amap))
 		return &amap->am_small;
+
+	bucket = UVM_AMAP_BUCKET(amap, slot);
+	baseslot = AMAP_BASE_SLOT(slot);
 
 	for (chunk = amap->am_buckets[bucket]; chunk != NULL;
 	    chunk = TAILQ_NEXT(chunk, ac_list)) {
@@ -150,12 +152,13 @@ amap_chunk_get(struct vm_amap *amap, int slot, int create, int waitf)
 void
 amap_chunk_free(struct vm_amap *amap, struct vm_amap_chunk *chunk)
 {
-	int bucket = UVM_AMAP_BUCKET(amap, chunk->ac_baseslot);
+	int bucket;
 	struct vm_amap_chunk *nchunk;
 
 	if (UVM_AMAP_SMALL(amap))
 		return;
 
+	bucket = UVM_AMAP_BUCKET(amap, chunk->ac_baseslot);
 	nchunk = TAILQ_NEXT(chunk, ac_list);
 	TAILQ_REMOVE(&amap->am_chunks, chunk, ac_list);
 	if (amap->am_buckets[bucket] == chunk) {
@@ -640,10 +643,9 @@ amap_copy(struct vm_map *map, struct vm_map_entry *entry, int waitf,
 
 		chunk = amap_chunk_get(amap, lcv, 1, PR_NOWAIT);
 		if (chunk == NULL) {
-			amap_unlock(srcamap);
-			/* Destroy the new amap. */
+			/* amap_wipeout() releases the shared lock. */
 			amap->am_ref--;
-			amap_free(amap);
+			amap_wipeout(amap);
 			return;
 		}
 

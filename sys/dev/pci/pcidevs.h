@@ -2,7 +2,7 @@
  * THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.
  *
  * generated from:
- *	OpenBSD: pcidevs,v 1.2141 2026/07/03 03:40:48 jmatthew Exp 
+ *	OpenBSD: pcidevs,v 1.2147 2026/08/14 03:32:01 jsg Exp 
  */
 /*	$NetBSD: pcidevs,v 1.30 1997/06/24 06:20:24 thorpej Exp $	*/
 
@@ -362,6 +362,7 @@
 #define	PCI_VENDOR_AMPERE	0x1def		/* Ampere */
 #define	PCI_VENDOR_KIOXIA	0x1e0f		/* Kioxia */
 #define	PCI_VENDOR_YMTC	0x1e49		/* YMTC */
+#define	PCI_VENDOR_MAXIO	0x1e4b		/* Maxio */
 #define	PCI_VENDOR_SSSTC	0x1e95		/* SSSTC */
 #define	PCI_VENDOR_QUECTEL	0x1eac		/* Quectel */
 #define	PCI_VENDOR_TEHUTI	0x1fc9		/* Tehuti Networks */
@@ -2247,6 +2248,7 @@
 #define	PCI_PRODUCT_ATI_NAVI33_5	0x7481		/* Navi 33 */
 #define	PCI_PRODUCT_ATI_NAVI33_2	0x7483		/* Navi 33 */
 #define	PCI_PRODUCT_ATI_NAVI33_3	0x7489		/* Navi 33 */
+#define	PCI_PRODUCT_ATI_NAVI33_6	0x748b		/* Navi 33 */
 #define	PCI_PRODUCT_ATI_NAVI33_4	0x7499		/* Navi 33 */
 #define	PCI_PRODUCT_ATI_MI300A	0x74a0		/* MI300A */
 #define	PCI_PRODUCT_ATI_MI300X	0x74a1		/* MI300X */
@@ -5972,6 +5974,60 @@
 #define	PCI_PRODUCT_INTEL_RKL_GT_4	0x4c8c		/* UHD Graphics */
 #define	PCI_PRODUCT_INTEL_RKL_GT_5	0x4c90		/* UHD Graphics */
 #define	PCI_PRODUCT_INTEL_RKL_GT_6	0x4c9a		/* UHD Graphics */
+#define	PCI_PRODUCT_INTEL_WCL_P2SB_8B	0x4d20		/* Core Series 3 P2SB */
+#define	PCI_PRODUCT_INTEL_WCL_PMC	0x4d21		/* Core Series 3 PMC */
+#define	PCI_PRODUCT_INTEL_WCL_SMB	0x4d22		/* Core Series 3 SMBus */
+#define	PCI_PRODUCT_INTEL_WCL_SPI	0x4d23		/* Core Series 3 SPI */
+#define	PCI_PRODUCT_INTEL_WCL_TH	0x4d24		/* Core Series 3 TH */
+#define	PCI_PRODUCT_INTEL_WCL_UART_0	0x4d25		/* Core Series 3 UART */
+#define	PCI_PRODUCT_INTEL_WCL_UART_1	0x4d26		/* Core Series 3 UART */
+#define	PCI_PRODUCT_INTEL_WCL_GSPI_0	0x4d27		/* Core Series 3 GSPI */
+#define	PCI_PRODUCT_INTEL_WCL_HDA	0x4d28		/* Core Series 3 HDA */
+#define	PCI_PRODUCT_INTEL_WCL_GSPI_1	0x4d30		/* Core Series 3 GSPI */
+#define	PCI_PRODUCT_INTEL_WCL_TC_XHCI	0x4d31		/* Core Series 3 xHCI */
+#define	PCI_PRODUCT_INTEL_WCL_TBT_DMA0	0x4d33		/* Core Series 3 TBT */
+#define	PCI_PRODUCT_INTEL_WCL_PCIE_1	0x4d3c		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_PCIE_2	0x4d3d		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_PCIE_3	0x4d3e		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_PCIE_4	0x4d3f		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_IEH_0	0x4d44		/* Core Series 3 IEH */
+#define	PCI_PRODUCT_INTEL_WCL_ISH	0x4d45		/* Core Series 3 ISH */
+#define	PCI_PRODUCT_INTEL_WCL_GSPI_2	0x4d46		/* Core Series 3 GSPI */
+#define	PCI_PRODUCT_INTEL_WCL_UFS	0x4d47		/* Core Series 3 UFS */
+#define	PCI_PRODUCT_INTEL_WCL_THC_0_1	0x4d48		/* Core Series 3 THC */
+#define	PCI_PRODUCT_INTEL_WCL_THC_0_2	0x4d49		/* Core Series 3 THC */
+#define	PCI_PRODUCT_INTEL_WCL_THC_1_1	0x4d4a		/* Core Series 3 THC */
+#define	PCI_PRODUCT_INTEL_WCL_THC_1_2	0x4d4b		/* Core Series 3 THC */
+#define	PCI_PRODUCT_INTEL_WCL_P2SB_16B	0x4d4c		/* Core Series 3 P2SB */
+#define	PCI_PRODUCT_INTEL_WCL_TC_PCIE_21	0x4d4e		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_TC_PCIE_22	0x4d4f		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_I2C_4	0x4d50		/* Core Series 3 I2C */
+#define	PCI_PRODUCT_INTEL_WCL_I2C_5	0x4d51		/* Core Series 3 I2C */
+#define	PCI_PRODUCT_INTEL_WCL_UART_2	0x4d52		/* Core Series 3 UART */
+#define	PCI_PRODUCT_INTEL_WCL_IEH_1	0x4d53		/* Core Series 3 IEH */
+#define	PCI_PRODUCT_INTEL_WCL_PCIE_6	0x4d5c		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_4	0x4d5d		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_5	0x4d5e		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_6	0x4d5f		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_PCIE_5	0x4d61		/* Core Series 3 PCIE */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_1	0x4d62		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_2	0x4d63		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_3	0x4d64		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_I3C_2	0x4d6f		/* Core Series 3 I3C */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_CSE_1	0x4d70		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_CSE_2	0x4d71		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_IDER	0x4d72		/* Core Series 3 IDE-R */
+#define	PCI_PRODUCT_INTEL_WCL_KT	0x4d73		/* Core Series 3 KT */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_CSE_3	0x4d74		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_HECI_CSE_4	0x4d75		/* Core Series 3 HECI */
+#define	PCI_PRODUCT_INTEL_WCL_I2C_0	0x4d78		/* Core Series 3 I2C */
+#define	PCI_PRODUCT_INTEL_WCL_I2C_1	0x4d79		/* Core Series 3 I2C */
+#define	PCI_PRODUCT_INTEL_WCL_I2C_2	0x4d7a		/* Core Series 3 I2C */
+#define	PCI_PRODUCT_INTEL_WCL_I2C_3	0x4d7b		/* Core Series 3 I2C */
+#define	PCI_PRODUCT_INTEL_WCL_I3C_1	0x4d7c		/* Core Series 3 I3C */
+#define	PCI_PRODUCT_INTEL_WCL_XHCI	0x4d7d		/* Core Series 3 xHCI */
+#define	PCI_PRODUCT_INTEL_WCL_XDCI	0x4d7e		/* Core Series 3 xDCI */
+#define	PCI_PRODUCT_INTEL_WCL_SRAM	0x4d7f		/* Core Series 3 SRAM */
 #define	PCI_PRODUCT_INTEL_JSL_ESPI	0x4d87		/* Jasper Lake eSPI */
 #define	PCI_PRODUCT_INTEL_JSL_P2SB	0x4da0		/* Jasper Lake P2SB */
 #define	PCI_PRODUCT_INTEL_JSL_PMC	0x4da1		/* Jasper Lake PMC */
@@ -6200,6 +6256,8 @@
 #define	PCI_PRODUCT_INTEL_E610_SGMII	0x57b2		/* E610-SGMII */
 #define	PCI_PRODUCT_INTEL_I219_LM25	0x57b3		/* I219-LM */
 #define	PCI_PRODUCT_INTEL_I219_V25	0x57b4		/* I219-V */
+#define	PCI_PRODUCT_INTEL_I219_LM27	0x57b7		/* I219-LM */
+#define	PCI_PRODUCT_INTEL_I219_V27	0x57b8		/* I219-V */
 #define	PCI_PRODUCT_INTEL_QEMU_NVME	0x5845		/* QEMU NVM Express Controller */
 #define	PCI_PRODUCT_INTEL_KBL_D_GT1	0x5902		/* HD Graphics 610 */
 #define	PCI_PRODUCT_INTEL_CORE7G_U_HB	0x5904		/* Core 7G Host */
@@ -7731,6 +7789,14 @@
 #define	PCI_PRODUCT_INTEL_NVME_2	0xf1a5		/* NVMe */
 #define	PCI_PRODUCT_INTEL_NVME_3	0xf1a6		/* NVMe */
 #define	PCI_PRODUCT_INTEL_NVME_4	0xf1a8		/* NVMe */
+#define	PCI_PRODUCT_INTEL_WCL_HB_6C	0xfd00		/* Core Series 3 Host */
+#define	PCI_PRODUCT_INTEL_WCL_HB_5C	0xfd03		/* Core Series 3 Host */
+#define	PCI_PRODUCT_INTEL_WCL_DTT	0xfd1d		/* Core Series 3 DTT */
+#define	PCI_PRODUCT_INTEL_WCL_IAA	0xfd2d		/* Core Series 3 IAA */
+#define	PCI_PRODUCT_INTEL_WCL_NPU	0xfd3e		/* Core Series 3 NPU */
+#define	PCI_PRODUCT_INTEL_WCL_CT	0xfd7d		/* Core Series 3 CT */
+#define	PCI_PRODUCT_INTEL_WCL_GT_1	0xfd80		/* Graphics */
+#define	PCI_PRODUCT_INTEL_WCL_GT_2	0xfd81		/* Graphics */
 
 /* Intergraph products */
 #define	PCI_PRODUCT_INTERGRAPH_4D50T	0x00e4		/* Powerstorm 4D50T */
@@ -8021,6 +8087,10 @@
 #define	PCI_PRODUCT_MATROX_MYST_G200_SD	0xff02		/* MGA Mystique G200 SD */
 #define	PCI_PRODUCT_MATROX_MILL_G200_SG	0xff03		/* MGA Millennium G200 SG */
 #define	PCI_PRODUCT_MATROX_MARV_G200_SD	0xff04		/* MGA Marvel G200 SD */
+
+/* Maxio */
+#define	PCI_PRODUCT_MAXIO_MAP1202	0x1202		/* MAP1202 */
+#define	PCI_PRODUCT_MAXIO_MAP1602	0x1602		/* MAP1602 */
 
 /* MediaTek products */
 #define	PCI_PRODUCT_MEDIATEK_MT7921K	0x0608		/* MT7921K */
@@ -9243,6 +9313,7 @@
 #define	PCI_PRODUCT_REALTEK_E2500V2	0x2502		/* E2500 */
 #define	PCI_PRODUCT_REALTEK_E2600	0x2600		/* E2600 */
 #define	PCI_PRODUCT_REALTEK_E3000	0x3000		/* Killer E3000 */
+#define	PCI_PRODUCT_REALTEK_E5000	0x5000		/* Killer E5000 */
 #define	PCI_PRODUCT_REALTEK_RTS5208	0x5208		/* RTS5208 Card Reader */
 #define	PCI_PRODUCT_REALTEK_RTS5209	0x5209		/* RTS5209 Card Reader */
 #define	PCI_PRODUCT_REALTEK_RTS5227	0x5227		/* RTS5227 Card Reader */
@@ -9429,6 +9500,7 @@
 #define	PCI_PRODUCT_SAMSUNG2_PM9B1_NVME	0xa80b		/* PM9B1 */
 #define	PCI_PRODUCT_SAMSUNG2_PM9C1_NVME	0xa80c		/* PM9C1 */
 #define	PCI_PRODUCT_SAMSUNG2_PM9C1A_NVME	0xa80d		/* PM9C1a */
+#define	PCI_PRODUCT_SAMSUNG2_PM9E1_NVME	0xa810		/* PM9E1 */
 #define	PCI_PRODUCT_SAMSUNG2_NVME_171X	0xa820		/* NVMe */
 #define	PCI_PRODUCT_SAMSUNG2_NVME_172X	0xa821		/* NVMe */
 #define	PCI_PRODUCT_SAMSUNG2_NVME_172X_A_B	0xa822		/* NVMe */
@@ -9691,6 +9763,7 @@
 
 /* SpacemiT products */
 #define	PCI_PRODUCT_SPACEMIT_K1	0x0001		/* K1 */
+#define	PCI_PRODUCT_SPACEMIT_K3	0x0002		/* K3 */
 
 /* Solid State Storage Technology Corporation products */
 #define	PCI_PRODUCT_SSSTC_CL1	0x9100		/* CL1 */

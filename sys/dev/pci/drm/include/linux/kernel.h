@@ -22,101 +22,10 @@
 #include <linux/limits.h>
 #include <asm/byteorder.h>
 #include <linux/wordpart.h>
-
-#define swap(a, b) \
-	do { __typeof(a) __tmp = (a); (a) = (b); (b) = __tmp; } while(0)
-
-#define ARRAY_SIZE nitems
-
-#define scnprintf(str, size, fmt, arg...) snprintf(str, size, fmt, ## arg)
-
-#define min_t(t, a, b) ({ \
-	t __min_a = (a); \
-	t __min_b = (b); \
-	__min_a < __min_b ? __min_a : __min_b; })
-
-#define max_t(t, a, b) ({ \
-	t __max_a = (a); \
-	t __max_b = (b); \
-	__max_a > __max_b ? __max_a : __max_b; })
-
-#define MIN_T(t, a, b) min_t(t, a, b)
-#define MAX_T(t, a, b) max_t(t, a, b)
-
-#define clamp_t(t, x, a, b) min_t(t, max_t(t, x, a), b)
-#define clamp(x, a, b) clamp_t(__typeof(x), x, a, b)
-#define clamp_val(x, a, b) clamp_t(__typeof(x), x, a, b)
-
-#define min(a, b) MIN(a, b)
-#define max(a, b) MAX(a, b)
-#define min3(x, y, z) MIN(x, MIN(y, z))
-#define max3(x, y, z) MAX(x, MAX(y, z))
-
-#define min_not_zero(a, b) (a == 0) ? b : ((b == 0) ? a : min(a, b))
-
-#define min_array(_array, _nitems)		\
-({						\
-	typeof(_array[0]) _r = _array[0];	\
-	for (int i = 1; i < _nitems; i++) {	\
-		if (_r > _array[i])		\
-			_r = _array[i];		\
-	}					\
-	_r;					\
-})
-
-#define max_array(_array, _nitems)		\
-({						\
-	typeof(_array[0]) _r = _array[0];	\
-	for (int i = 1; i < _nitems; i++) {	\
-		if (_r < _array[i])		\
-			_r = _array[i];		\
-	}					\
-	_r;					\
-})
-
-static inline char *
-kvasprintf(int flags, const char *fmt, va_list ap)
-{
-	char *buf;
-	size_t len;
-	va_list vl;
-
-	va_copy(vl, ap);
-	len = vsnprintf(NULL, 0, fmt, vl);
-	va_end(vl);
-
-	buf = malloc(len + 1, M_DRM, flags);
-	if (buf) {
-		vsnprintf(buf, len + 1, fmt, ap);
-	}
-
-	return buf;
-}
-
-static inline char *
-kasprintf(int flags, const char *fmt, ...)
-{
-	char *buf;
-	va_list ap;
-
-	va_start(ap, fmt);
-	buf = kvasprintf(flags, fmt, ap);
-	va_end(ap);
-
-	return buf;
-}
-
-static inline int
-vscnprintf(char *buf, size_t size, const char *fmt, va_list ap)
-{
-	int nc;
-
-	nc = vsnprintf(buf, size, fmt, ap);
-	if (nc > (size - 1))
-		return (size - 1);
-	else
-		return nc;
-}
+#include <linux/array_size.h>
+#include <linux/sprintf.h>
+#include <linux/minmax.h>
+#include <linux/panic.h>
 
 #define might_sleep()		assertwaitok()
 #define might_sleep_if(x)	do {	\
@@ -124,11 +33,6 @@ vscnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 		assertwaitok();		\
 } while (0)
 #define might_fault()
-
-#define add_taint(x, y)
-#define TAINT_MACHINE_CHECK	0
-#define TAINT_WARN		1
-#define LOCKDEP_STILL_OK	0
 
 #define u64_to_user_ptr(x)	((void *)(uintptr_t)(x))
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: grid.c,v 1.153 2026/07/02 08:51:05 nicm Exp $ */
+/* $OpenBSD: grid.c,v 1.156 2026/08/03 12:58:53 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -192,6 +192,25 @@ struct grid_line *
 grid_get_line(struct grid *gd, u_int line)
 {
 	return (&gd->linedata[line]);
+}
+
+/* Get line time. */
+time_t
+grid_line_time(const struct grid_line *gl)
+{
+	if (gl->time == 0)
+		return (0);
+	return (start_time.tv_sec + gl->time - 1);
+}
+
+/* Set line time. */
+static void
+grid_line_set_time(struct grid_line *gl)
+{
+	if (current_time == 0)
+		gl->time = 0;
+	else
+		gl->time = current_time - start_time.tv_sec + 1;
 }
 
 /* Adjust number of lines. */
@@ -435,7 +454,7 @@ grid_scroll_history(struct grid *gd, u_int bg)
 
 	gd->hscrolled++;
 	grid_compact_line(&gd->linedata[gd->hsize]);
-	gd->linedata[gd->hsize].time = current_time;
+	grid_line_set_time(&gd->linedata[gd->hsize]);
 	gd->hsize++;
 	gd->scroll_added++;
 }
@@ -477,7 +496,7 @@ grid_scroll_history_region(struct grid *gd, u_int upper, u_int lower, u_int bg)
 
 	/* Move the line into the history. */
 	memcpy(gl_history, gl_upper, sizeof *gl_history);
-	gl_history->time = current_time;
+	grid_line_set_time(gl_history);
 
 	/* Then move the region up and clear the bottom line. */
 	memmove(gl_upper, gl_upper + 1, (lower - upper) * sizeof *gl_upper);
@@ -612,9 +631,13 @@ grid_set_cell(struct grid *gd, u_int px, u_int py, const struct grid_cell *gc)
 
 /* Set padding at position. */
 void
-grid_set_padding(struct grid *gd, u_int px, u_int py)
+grid_set_padding(struct grid *gd, u_int px, u_int py, int bg)
 {
-	grid_set_cell(gd, px, py, &grid_padding_cell);
+	struct grid_cell	gc;
+
+	memcpy(&gc, &grid_padding_cell, sizeof gc);
+	gc.bg = bg;
+	grid_set_cell(gd, px, py, &gc);
 }
 
 /* Set cells at position. */
@@ -1611,6 +1634,26 @@ grid_line_length(struct grid *gd, u_int py)
 	return (px);
 }
 
+/* Get last position on line, not including padding. */
+u_int
+grid_line_limit(struct grid *gd, u_int py)
+{
+	struct grid_cell	gc;
+	u_int			px;
+
+	px = grid_line_length(gd, py);
+	if (px == 0)
+		return (0);
+	px--;
+	while (px > 0) {
+		grid_get_cell(gd, px, py, &gc);
+		if (~gc.flags & GRID_FLAG_PADDING)
+			break;
+		px--;
+	}
+	return (px);
+}
+
 /* Check if character is in set. */
 int
 grid_in_set(struct grid *gd, u_int px, u_int py, const char *set)
@@ -1650,8 +1693,14 @@ grid_line_flags_string(int flags)
 		strlcat(s, "DEAD,", sizeof s);
 	if (flags & GRID_LINE_START_PROMPT)
 		strlcat(s, "START_PROMPT,", sizeof s);
+	if (flags & GRID_LINE_SECOND_PROMPT)
+		strlcat(s, "SECOND_PROMPT,", sizeof s);
+	if (flags & GRID_LINE_START_COMMAND)
+		strlcat(s, "START_COMMAND,", sizeof s);
 	if (flags & GRID_LINE_START_OUTPUT)
 		strlcat(s, "START_OUTPUT,", sizeof s);
+	if (flags & GRID_LINE_END_OUTPUT)
+		strlcat(s, "END_OUTPUT,", sizeof s);
 	if (flags & GRID_LINE_HYPERLINK)
 		strlcat(s, "HYPERLINK,", sizeof s);
 	if (*s == '\0')

@@ -1,4 +1,4 @@
-/* $OpenBSD: screen-redraw.c,v 1.148 2026/07/01 15:44:13 nicm Exp $ */
+/* $OpenBSD: screen-redraw.c,v 1.157 2026/07/24 08:49:23 nicm Exp $ */
 
 /*
  * Copyright (c) 2026 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -68,8 +68,9 @@ enum redraw_span_type {
 	REDRAW_SPAN_STATUS,	/* pane status line */
 	REDRAW_SPAN_BORDER,	/* pane border */
 	REDRAW_SPAN_SCROLLBAR,	/* pane scrollbar */
+	REDRAW_SPAN_MENU,	/* window menu */
 };
-#define REDRAW_SPAN_TYPES 6
+#define REDRAW_SPAN_TYPES 7
 
 /* Border connections to adjacent cells. */
 #define REDRAW_BORDER_L 0x1
@@ -91,7 +92,8 @@ enum redraw_span_type {
 #define REDRAW_PANE_STATUS 0x10
 #define REDRAW_PANE_SCROLLBAR 0x20
 #define REDRAW_STATUS 0x40
-#define REDRAW_OVERLAY 0x80
+#define REDRAW_MENU 0x80
+#define REDRAW_OVERLAY 0x100
 
 /* Draw everything. */
 #define REDRAW_ALL 0x7fffffff
@@ -163,6 +165,15 @@ struct redraw_span_data {
 			/* Flags for this span. */
 			int			 flags;
 		} sb; /* pane scrollbar */
+
+		struct {
+			/* Menu this span belongs to. */
+			struct menu_data	*md;
+
+			/* Position of span inside the menu. */
+			u_int			 px;
+			u_int			 py;
+		} m; /* menu */
 	};
 };
 
@@ -251,6 +262,8 @@ redraw_flags_to_string(int flags)
 		strlcat(s, "pane-status ", sizeof s);
 	if (flags & REDRAW_PANE_SCROLLBAR)
 		strlcat(s, "scrollbar ", sizeof s);
+	if (flags & REDRAW_MENU)
+		strlcat(s, "menu ", sizeof s);
 	if (flags & REDRAW_OVERLAY)
 		strlcat(s, "overlay ", sizeof s);
 	if (REDRAW_IS_ALL(flags))
@@ -307,7 +320,7 @@ redraw_reset_cell(struct redraw_build_ctx *bctx, u_int x, u_int y)
 	struct window			*w = bctx->w;
 
 	memset(bc, 0, sizeof *bc);
-	if (bctx->ox + x <= w->sx && bctx->oy + y <= w->sy)
+	if (bctx->ox + x < w->sx && bctx->oy + y < w->sy)
 		bc->data.type = REDRAW_SPAN_EMPTY;
 	else
 		bc->data.type = REDRAW_SPAN_OUTSIDE;
@@ -534,7 +547,8 @@ redraw_mark_border_cell(struct redraw_build_ctx *bctx, int wx, int wy,
 	 * merged.
 	 */
 	if (!floating) {
-		if (bc->data.type == REDRAW_SPAN_EMPTY)
+		if (bc->data.type == REDRAW_SPAN_EMPTY ||
+		    bc->data.type == REDRAW_SPAN_OUTSIDE)
 			reset = 1;
 		else if (bc->data.type != REDRAW_SPAN_BORDER)
 			return;
@@ -683,20 +697,22 @@ redraw_mark_pane_borders(struct redraw_build_ctx *bctx, struct window_pane *wp,
 	bottom = wp->yoff + wp->sy;
 
 	mark_left = (left >= 0);
-	mark_right = (right <= (int)bctx->w->sx);
 	mark_top = (top >= 0);
-	mark_bottom = (bottom <= (int)bctx->w->sy);
 
 	if (floating) {
+		mark_right = (right < (int)bctx->w->sx);
+		mark_bottom = (bottom < (int)bctx->w->sy);
 		if (left < 0)
 			left = 0;
-		if (right > (int)bctx->w->sx)
+		if (right >= (int)bctx->w->sx)
 			right = (int)bctx->w->sx - 1;
 		if (top < 0)
 			top = 0;
-		if (bottom > (int)bctx->w->sy)
+		if (bottom >= (int)bctx->w->sy)
 			bottom = (int)bctx->w->sy - 1;
 	} else {
+		mark_right = (right <= (int)bctx->w->sx);
+		mark_bottom = (bottom <= (int)bctx->w->sy);
 		if (pane_status == PANE_STATUS_TOP)
 			mark_bottom = 0;
 		else if (pane_status == PANE_STATUS_BOTTOM)
@@ -828,6 +844,34 @@ redraw_mark_two_pane_colours(struct redraw_build_ctx *bctx)
 	}
 }
 
+/* Mark the window menu above all panes. */
+static void
+redraw_mark_menu(struct redraw_build_ctx *bctx)
+{
+	struct menu_data		*md = bctx->w->menu;
+	struct redraw_build_cell	*bc;
+	u_int				 px, py, x, y, sx, sy;
+
+	if (md == NULL)
+		return;
+
+	sx = menu_width(md);
+	sy = menu_height(md);
+	for (py = 0; py < sy; py++) {
+		for (px = 0; px < sx; px++) {
+			if (!redraw_window_to_scene(bctx, menu_x(md) + px,
+			    menu_y(md) + py, &x, &y))
+				continue;
+			bc = redraw_get_build_cell(bctx, x, y);
+			memset(bc, 0, sizeof *bc);
+			bc->data.type = REDRAW_SPAN_MENU;
+			bc->data.m.md = md;
+			bc->data.m.px = px;
+			bc->data.m.py = py;
+		}
+	}
+}
+
 /* Return true if two adjacent build cells can be joined into one span. */
 static int
 redraw_compare_data(struct redraw_build_cell *a, struct redraw_build_cell *b)
@@ -874,6 +918,12 @@ redraw_compare_data(struct redraw_build_cell *a, struct redraw_build_cell *b)
 		    ad->sb.flags != bd->sb.flags)
 			return (0);
 		return (1);
+	case REDRAW_SPAN_MENU:
+		if (ad->m.md != bd->m.md ||
+		    ad->m.py != bd->m.py ||
+		    ad->m.px + 1 != bd->m.px)
+			return (0);
+		return (1);
 	case REDRAW_SPAN_OUTSIDE:
 	case REDRAW_SPAN_EMPTY:
 		return (1);
@@ -908,6 +958,7 @@ redraw_build_cells(struct redraw_build_ctx *bctx)
 	TAILQ_FOREACH_REVERSE(wp, &w->z_index, window_panes_zindex, zentry)
 		redraw_mark_pane(bctx, wp);
 	redraw_mark_two_pane_colours(bctx);
+	redraw_mark_menu(bctx);
 }
 
 /*
@@ -1182,7 +1233,15 @@ redraw_draw_border_span(struct redraw_draw_ctx *dctx,
 
 	if (wp == NULL) {
 		redraw_get_default_border_style(dctx, &gc, &pane_lines);
-		window_get_border_cell(w, NULL, pane_lines, cell_type, &gc);
+		if (span->data.type == REDRAW_SPAN_OUTSIDE)
+			window_get_fill_cell(w, 0, &gc);
+		else if (span->data.type == REDRAW_SPAN_EMPTY)
+			window_get_fill_cell(w, 1, &gc);
+		else {
+			if (span->data.type != REDRAW_SPAN_BORDER)
+				pane_lines = PANE_LINES_SINGLE;
+			window_get_border_cell(NULL, pane_lines, cell_type, &gc);
+		}
 	} else {
 		window_pane_get_border_style(wp, c, &gc);
 		window_pane_get_border_cell(wp, cell_type, &gc);
@@ -1303,6 +1362,20 @@ redraw_draw_scrollbar_span(struct redraw_draw_ctx *dctx,
 	}
 }
 
+/* Draw a menu span. */
+static void
+redraw_draw_menu_span(struct redraw_draw_ctx *dctx,
+    struct redraw_span *span, u_int x, u_int y, u_int n)
+{
+	struct redraw_scene	*scene = dctx->scene;
+	struct tty		*tty = &scene->c->tty;
+	struct screen		*s = menu_screen(span->data.m.md);
+	u_int			 px;
+
+	px = span->data.m.px + (x - span->x);
+	tty_draw_line(tty, s, px, span->data.m.py, n, x, y, NULL);
+}
+
 /* Draw a span. */
 static void
 redraw_draw_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
@@ -1342,6 +1415,9 @@ redraw_draw_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 			break;
 		case REDRAW_SPAN_SCROLLBAR:
 			redraw_draw_scrollbar_span(dctx, span, x, y, n);
+			break;
+		case REDRAW_SPAN_MENU:
+			redraw_draw_menu_span(dctx, span, x, y, n);
 			break;
 		}
 	}
@@ -1434,6 +1510,10 @@ redraw_draw_lines(struct redraw_draw_ctx *dctx, int flags)
 					if (~flags & REDRAW_PANE_SCROLLBAR)
 						continue;
 					break;
+				case REDRAW_SPAN_MENU:
+					if (~flags & REDRAW_MENU)
+						continue;
+					break;
 				default:
 					continue;
 				}
@@ -1442,6 +1522,26 @@ redraw_draw_lines(struct redraw_draw_ctx *dctx, int flags)
 			TAILQ_FOREACH(span, spans, entry)
 				redraw_draw_span(dctx, span, cy);
 		}
+	}
+}
+
+/* Draw menu spans. */
+static void
+redraw_draw_menu_lines(struct redraw_draw_ctx *dctx)
+{
+	struct redraw_scene	*scene = dctx->scene;
+	struct redraw_line	*line;
+	struct redraw_span	*span;
+	u_int			 y, cy;
+
+	for (y = 0; y < scene->sy; y++) {
+		line = &scene->lines[y];
+		if (dctx->flags & REDRAW_STATUS_TOP)
+			cy = dctx->status_lines + y;
+		else
+			cy = y;
+		TAILQ_FOREACH(span, &line->spans[REDRAW_SPAN_MENU], entry)
+			redraw_draw_span(dctx, span, cy);
 	}
 }
 
@@ -1510,7 +1610,7 @@ redraw_set_draw_context(struct redraw_draw_ctx *dctx,
 
 	if (server_is_marked(s, s->curw, marked_pane.wp))
 		dctx->marked = marked_pane.wp;
-	dctx->active = server_client_get_pane(c);
+	dctx->active = s->curw->window->active;
 
 	lines = status_line_size(c);
 	if (options_get_number(oo, "status-position") == 0)
@@ -1588,8 +1688,10 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 	struct screen		*sl;
 	struct redraw_scene	*scene;
 	struct window_pane	*loop;
-	u_int			 width, i, y, lines;
+	u_int			 width, i, y, lines, j;
 	struct redraw_span	*first;
+	struct visible_ranges	*r;
+	struct visible_range	*rr;
 	int			 redraw;
 
 	if (c->flags & CLIENT_SUSPENDED)
@@ -1618,6 +1720,8 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 	if (scene == NULL)
 		return;
 	redraw_set_draw_context(&dctx, scene);
+	if (w->menu != NULL)
+		menu_update(w->menu);
 
 	if (flags & (REDRAW_PANE_BORDER|REDRAW_PANE_STATUS)) {
 		TAILQ_FOREACH(loop, &scene->w->panes, entry) {
@@ -1667,7 +1771,7 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 		}
 	}
 	tty_sync_start(tty);
-	tty_update_mode(tty, 0, NULL);
+	tty_update_mode(tty, tty->mode & ~CURSOR_MODES, NULL);
 
 	if (wp != NULL)
 		redraw_draw_pane_lines(&dctx, wp, flags);
@@ -1684,6 +1788,8 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 			}
 		}
 	}
+	if (w->menu != NULL && (flags & REDRAW_MENU))
+		redraw_draw_menu_lines(&dctx);
 
 	if (flags & REDRAW_STATUS) {
 		lines = dctx.status_lines;
@@ -1694,8 +1800,16 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 		else
 			y = c->tty.sy - lines;
 		sl = c->status.active;
-		for (i = 0; i < lines; i++)
-			tty_draw_line(tty, sl, 0, i, UINT_MAX, 0, y + i, NULL);
+		for (i = 0; i < lines; i++) {
+			r = tty_check_overlay_range(tty, 0, y + i, tty->sx);
+			for (j = 0; j < r->used; j++) {
+				rr = &r->ranges[j];
+				if (rr->nx == 0)
+					continue;
+				tty_draw_line(tty, sl, rr->px, i, rr->nx,
+				    rr->px, y + i, NULL);
+			}
+		}
 	}
 	if (c->overlay_draw != NULL && (flags & REDRAW_OVERLAY))
 		c->overlay_draw(c, c->overlay_data);
@@ -1747,15 +1861,22 @@ redraw_screen(struct client *c)
 {
 	int	flags = 0;
 
-	if (c->flags & CLIENT_REDRAWWINDOW)
-		redraw_draw(c, NULL, REDRAW_ALL);
-	else {
+	if (c->flags & CLIENT_REDRAWWINDOW) {
+		if (c->flags & CLIENT_REDRAWOVERLAY)
+			redraw_draw(c, NULL, REDRAW_ALL);
+		else
+			redraw_draw(c, NULL, REDRAW_ALL & ~REDRAW_OVERLAY);
+	} else {
 		if (c->flags & CLIENT_REDRAWBORDERS)
 			flags |= (REDRAW_PANE_BORDER|REDRAW_PANE_STATUS);
 		if (c->flags & CLIENT_REDRAWSTATUS)
 			flags |= (REDRAW_STATUS|REDRAW_PANE_STATUS);
 		if (c->flags & CLIENT_REDRAWOVERLAY)
 			flags |= REDRAW_OVERLAY;
+		if (c->flags & CLIENT_REDRAWMENU)
+			flags |= REDRAW_MENU;
+		if (c->session->curw->window->menu != NULL)
+			flags |= REDRAW_MENU;
 		if (flags != 0)
 			redraw_draw(c, NULL, flags);
 	}
@@ -1766,6 +1887,8 @@ void
 redraw_pane(struct client *c, struct window_pane *wp)
 {
 	redraw_draw(c, wp, REDRAW_PANE|REDRAW_PANE_SCROLLBAR);
+	if (c->session->curw->window->menu != NULL)
+		redraw_draw(c, NULL, REDRAW_MENU);
 }
 
 /* Draw a pane's scrollbar. */

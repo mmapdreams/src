@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.c,v 1.537 2026/05/14 12:26:44 claudio Exp $ */
+/*	$OpenBSD: session.c,v 1.540 2026/07/24 05:01:01 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
@@ -362,9 +362,7 @@ session_main(int debug, int verbose)
 					bgp_fsm(p, EVNT_START, NULL);
 					break;
 				case Timer_IdleHoldReset:
-					p->IdleHoldTime =
-					    INTERVAL_IDLE_HOLD_INITIAL;
-					p->errcnt = 0;
+					p->IdleHoldTime = 0;
 					timer_stop(&p->timers,
 					    Timer_IdleHoldReset);
 					break;
@@ -595,10 +593,8 @@ init_peer(struct peer *p, struct bgpd_config *c)
 	peer_cnt++;
 
 	change_state(p, STATE_IDLE, EVNT_NONE);
-	if (p->conf.down)
-		timer_stop(&p->timers, Timer_IdleHold); /* no autostart */
-	else
-		timer_set(&p->timers, Timer_IdleHold, SESSION_CLEAR_DELAY);
+	if (!p->conf.down)
+		bgp_fsm(p, EVNT_START, NULL);
 
 	p->stats.last_updown = getmonotime();
 
@@ -714,15 +710,6 @@ session_accept(int listenfd)
 	}
 
 	p = getpeerbyip(conf, (struct sockaddr *)&cliaddr);
-
-	if (p != NULL && p->state == STATE_IDLE && p->errcnt < 2) {
-		if (timer_running(&p->timers, Timer_IdleHold, NULL)) {
-			/* fast reconnect after clear */
-			p->passive = 1;
-			bgp_fsm(p, EVNT_START, NULL);
-		}
-	}
-
 	if (p != NULL &&
 	    (p->state == STATE_CONNECT || p->state == STATE_ACTIVE)) {
 		if (p->fd != -1) {
@@ -1206,9 +1193,8 @@ session_dispatch_imsg(struct imsgbuf *imsgbuf, int idx, u_int *listener_cnt)
 	uint8_t			 errcode, subcode;
 
 	while (imsgbuf) {
-		if ((n = imsg_get(imsgbuf, &imsg)) == -1)
-			fatal("session_dispatch_imsg: imsg_get error");
-
+		if ((n = imsgbuf_get(imsgbuf, &imsg)) == -1)
+			fatal("session_dispatch_imsg: imsgbuf_get error");
 		if (n == 0)
 			break;
 

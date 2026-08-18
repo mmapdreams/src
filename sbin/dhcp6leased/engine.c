@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.36 2026/05/22 10:12:40 florian Exp $	*/
+/*	$OpenBSD: engine.c,v 1.42 2026/08/04 12:50:43 claudio Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021, 2024 Florian Obser <florian@openbsd.org>
@@ -275,9 +275,8 @@ engine_dispatch_frontend(int fd, short event, void *bula)
 	struct imsgev			*iev = bula;
 	struct imsgbuf			*ibuf = &iev->ibuf;
 	struct imsg			 imsg;
-	struct dhcp6leased_iface		*iface;
-	ssize_t				 n;
-	int				 shut = 0;
+	struct dhcp6leased_iface	*iface;
+	int				 n, shut = 0;
 	int				 verbose;
 	uint32_t			 if_index;
 
@@ -297,8 +296,8 @@ engine_dispatch_frontend(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get error", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get error", __func__);
 		if (n == 0)	/* No more messages. */
 			break;
 
@@ -387,8 +386,7 @@ engine_dispatch_main(int fd, short event, void *bula)
 	struct imsgev			*iev = bula;
 	struct imsgbuf			*ibuf = &iev->ibuf;
 	struct imsg_ifinfo		 imsg_ifinfo;
-	ssize_t				 n;
-	int				 shut = 0;
+	int				 n, shut = 0;
 
 	if (event & EV_READ) {
 		if ((n = imsgbuf_read(ibuf)) == -1)
@@ -406,8 +404,8 @@ engine_dispatch_main(int fd, short event, void *bula)
 	}
 
 	for (;;) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal("%s: imsg_get error", __func__);
+		if ((n = imsgbuf_get(ibuf, &imsg)) == -1)
+			fatal("%s: imsgbuf_get error", __func__);
 		if (n == 0)	/* No more messages. */
 			break;
 
@@ -732,6 +730,7 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 	size_t			 rem;
 	uint32_t		 t1, t2, lease_time;
 	int			 serverid_len, rapid_commit = 0;
+	int			 found_client_id = 0;
 	uint8_t			 serverid[SERVERID_SIZE];
 	uint8_t			*p;
 	char			 ifnamebuf[IF_NAMESIZE], *if_name;
@@ -753,6 +752,7 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 	    iface_conf->ia_count);
 
 	serverid_len = t1 = t2 = lease_time = 0;
+	memset(serverid, 0, SERVERID_SIZE);
 	memset(iface->new_pds, 0, sizeof(iface->new_pds));
 
 	p = dhcp->packet;
@@ -793,6 +793,7 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 				log_debug("%s: message not for us", __func__);
 				goto out;
 			}
+			found_client_id = 1;
 			break;
 		case DHO_SERVERID:
 			/*
@@ -870,6 +871,11 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 		goto out;
 	}
 
+	if (!found_client_id) {
+		log_warnx("%s: Did not receive client identifier", __func__);
+		goto out;
+	}
+
 
 	SIMPLEQ_FOREACH(ia_conf, &iface_conf->iface_ia_list, entry) {
 		struct prefix	*pd = &iface->new_pds[ia_conf->id];
@@ -917,6 +923,11 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 			    dhcp_message_type2str(hdr.msg_type));
 			goto out;
 		}
+		if (memcmp(hdr.xid, iface->xid, XID_SIZE) != 0) {
+			log_debug("%s: ignoring %s with wrong transaction id",
+			    __func__, dhcp_message_type2str(hdr.msg_type));
+			goto out;
+		}
 		iface->serverid_len = serverid_len;
 		memcpy(iface->serverid, serverid, SERVERID_SIZE);
 		memcpy(iface->pds, iface->new_pds, sizeof(iface->pds));
@@ -926,6 +937,15 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 		switch (iface->state) {
 		case IF_REQUESTING:
 		case IF_RENEWING:
+			if (serverid_len == 0 || serverid_len !=
+			    iface->serverid_len || memcmp(serverid,
+			    iface->serverid, serverid_len) != 0) {
+				log_debug("%s: ignoring %s from wrong server",
+				    __func__, dhcp_message_type2str(
+				    hdr.msg_type));
+				goto out;
+			}
+			break;
 		case IF_REBINDING:
 		case IF_REBOOTING:
 			break;
@@ -936,6 +956,11 @@ parse_dhcp(struct dhcp6leased_iface *iface, struct imsg_dhcp *dhcp)
 		default:
 			log_debug("%s: ignoring unexpected %s", __func__,
 			    dhcp_message_type2str(hdr.msg_type));
+			goto out;
+		}
+		if (memcmp(hdr.xid, iface->xid, XID_SIZE) != 0) {
+			log_debug("%s: ignoring %s with wrong transaction id",
+			    __func__, dhcp_message_type2str(hdr.msg_type));
 			goto out;
 		}
 		iface->serverid_len = serverid_len;
@@ -1724,7 +1749,7 @@ in6_prefixlen2mask(struct in6_addr *maskp, int len)
 	int bytelen, bitlen, i;
 
 	if (0 > len || len > 128) {
-		log_debug("%s: invalid prefix length(%d)\n", __func__, len);
+		log_debug("%s: invalid prefix length(%d)", __func__, len);
 		len = 128;
 	}
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pipex.c,v 1.162 2025/10/30 17:30:46 mvs Exp $ */
+/*	$OpenBSD: pipex.c,v 1.164 2026/07/17 18:51:29 bluhm Exp $ */
 
 /*-
  * Copyright (c) 2009 Internet Initiative Japan Inc.
@@ -1451,7 +1451,7 @@ pipex_pptp_lookup_session(struct mbuf *m0)
 	struct ip ip;
 	uint16_t flags;
 	uint16_t id;
-	int hlen;
+	int iphlen, hlen;
 
 	if (m0->m_pkthdr.len < PIPEX_IPGRE_HDRLEN) {
 		PIPEX_DBG((NULL, LOG_DEBUG,
@@ -1461,15 +1461,22 @@ pipex_pptp_lookup_session(struct mbuf *m0)
 
 	/* get ip header info */
 	m_copydata(m0, 0, sizeof(struct ip), &ip);
-	hlen = ip.ip_hl << 2;
+	iphlen = ip.ip_hl << 2;
 
 	/*
 	 * m0 has already passed ip_input(), so there is
 	 * no necessity for ip packet inspection.
 	 */
 
+	hlen = iphlen + sizeof(gre);
+	if (m0->m_pkthdr.len < hlen) {
+		PIPEX_DBG((NULL, LOG_DEBUG,
+		    "<%s> packet length is too short", __func__));
+		goto not_ours;
+	}
+
 	/* get gre flags */
-	m_copydata(m0, hlen, sizeof(gre), &gre);
+	m_copydata(m0, iphlen, sizeof(gre), &gre);
 	flags = ntohs(gre.flags);
 
 	/* gre version must be '1' */
@@ -1521,7 +1528,7 @@ struct mbuf *
 pipex_pptp_input(struct mbuf *m0, struct pipex_session *session,
     struct netstack *ns)
 {
-	int hlen, has_seq, has_ack, nseq;
+	int iphlen, hlen, has_seq, has_ack, nseq;
 	const char *reason = "";
 	u_char *cp, *seqp = NULL, *ackp = NULL;
 	uint32_t flags, seq = 0, ack = 0;
@@ -1535,22 +1542,33 @@ pipex_pptp_input(struct mbuf *m0, struct pipex_session *session,
 
 	/* get ip header */
 	ip = mtod(m0, struct ip *);
-	hlen = ip->ip_hl << 2;
-
-	/* seek gre header */
-	gre = PIPEX_SEEK_NEXTHDR(ip, hlen, struct pipex_gre_header *);
-	flags = ntohs(gre->flags);
-
-	/* pullup for seek sequences in header */
-	has_seq = (flags & PIPEX_GRE_SFLAG) ? 1 : 0;
-	has_ack = (flags & PIPEX_GRE_AFLAG) ? 1 : 0;
-	hlen = PIPEX_IPGRE_HDRLEN + 4 * (has_seq + has_ack);
+	iphlen = ip->ip_hl << 2;
+	hlen = iphlen + sizeof(*gre);
 	if (m0->m_len < hlen) {
 		m0 = m_pullup(m0, hlen);
 		if (m0 == NULL) {
 			PIPEX_DBG((session, LOG_DEBUG, "pullup failed."));
 			goto drop;
 		}
+		ip = mtod(m0, struct ip *);
+	}
+
+	/* seek gre header */
+	gre = PIPEX_SEEK_NEXTHDR(ip, iphlen, struct pipex_gre_header *);
+	flags = ntohs(gre->flags);
+
+	/* pullup for seek sequences in header */
+	has_seq = (flags & PIPEX_GRE_SFLAG) ? 1 : 0;
+	has_ack = (flags & PIPEX_GRE_AFLAG) ? 1 : 0;
+	hlen += 4 * (has_seq + has_ack);
+	if (m0->m_len < hlen) {
+		m0 = m_pullup(m0, hlen);
+		if (m0 == NULL) {
+			PIPEX_DBG((session, LOG_DEBUG, "pullup failed."));
+			goto drop;
+		}
+		ip = mtod(m0, struct ip *);
+		gre = PIPEX_SEEK_NEXTHDR(ip, iphlen, struct pipex_gre_header *);
 	}
 
 	/* check sequence */
@@ -1923,12 +1941,12 @@ pipex_l2tp_output(struct mbuf *m0, struct pipex_session *session)
 		mtx_enter(&session->pxs_mtx);
 		if (session->proto.l2tp.ipsecflowinfo > 0) {
 			if ((mtag = m_tag_get(PACKET_TAG_IPSEC_FLOWINFO,
-			    sizeof(u_int32_t), M_NOWAIT)) == NULL) {
+			    sizeof(uint32_t), M_NOWAIT)) == NULL) {
 				mtx_leave(&session->pxs_mtx);
 				goto drop;
 			}
 
-			*(u_int32_t *)(mtag + 1) =
+			*(uint32_t *)(mtag + 1) =
 			    session->proto.l2tp.ipsecflowinfo;
 			m_tag_prepend(m0, mtag);
 		}

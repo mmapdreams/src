@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_pager.c,v 1.97 2026/03/14 11:05:21 kettenis Exp $	*/
+/*	$OpenBSD: uvm_pager.c,v 1.99 2026/07/11 13:13:16 kettenis Exp $	*/
 /*	$NetBSD: uvm_pager.c,v 1.36 2000/11/27 18:26:41 chs Exp $	*/
 
 /*
@@ -121,6 +121,24 @@ uvm_pseg_init(struct uvm_pseg *pseg)
 	    &kv_any, &kp_none, &kd_trylock);
 }
 
+int
+uvm_pseg_reserve_available(void)
+{
+	int count = 0;
+	int i, j;
+
+	KASSERT(curproc == uvm.pagedaemon_proc);
+
+	for (i = 0; i < 2; i++) {
+		for (j = 0; j < 2; j++) {
+			if (!UVM_PSEG_INUSE(&psegs[i], j))
+				count++;
+		}
+	}
+
+	return count;
+}
+
 /*
  * Acquire a pager map segment.
  *
@@ -131,8 +149,8 @@ uvm_pseg_init(struct uvm_pseg *pseg)
 vaddr_t
 uvm_pseg_get(int flags)
 {
-	int i;
 	struct uvm_pseg *pseg;
+	int i, use_reserve = 0;
 
 	mtx_enter(&uvm_pseg_lck);
 
@@ -150,8 +168,7 @@ pager_seg_restart:
 		}
 
 		/* Keep indexes 0,1 reserved for pagedaemon. */
-		if ((pseg == &psegs[0] || pseg == &psegs[1]) &&
-		    (curproc != uvm.pagedaemon_proc))
+		if ((pseg == &psegs[0] || pseg == &psegs[1]) && !use_reserve)
 			i = 2;
 		else
 			i = 0;
@@ -163,6 +180,15 @@ pager_seg_restart:
 				return pseg->start + i * MAXBSIZE;
 			}
 		}
+	}
+
+	/*
+	 * Let the pagdeamon dig into its reserve if we couldn't get a
+	 * "normal" slot.
+	 */
+	if (curproc == uvm.pagedaemon_proc && !use_reserve) {
+		use_reserve = 1;
+		goto pager_seg_restart;
 	}
 
 pager_seg_fail:
@@ -619,11 +645,14 @@ uvm_aio_biodone(struct buf *bp)
  * of the pagedaemon.
  */
 int
-uvm_swap_dropcluster(struct vm_page **pgs, int npages, int error)
+uvm_swap_dropcluster(struct vm_page **pgs, int npages, int error, vaddr_t kva)
 {
 	struct vm_page *pg;
 	struct rwlock *slock = NULL;
-	int i, slot = -1;
+	int i, slot = -1, freed = 0, swpgonly = 0;
+#ifdef UVM_SWAP_ENCRYPT
+	struct swapdev *sdp = NULL;
+#endif
 
 	for (i = 0; i < npages; i++) {
 		int anon_disposed = 0;
@@ -643,8 +672,20 @@ uvm_swap_dropcluster(struct vm_page **pgs, int npages, int error)
 		}
 
 		rw_enter(slock, RW_WRITE);
+		/*
+		 * If the corresponding anon has been freed while this
+		 * page was PG_BUSY, free it below.
+		 */
+		anon_disposed = (pg->pg_flags & PG_RELEASED) != 0;
+		KASSERT(!anon_disposed || pg->uobject != NULL ||
+		    pg->uanon->an_ref == 0);
+
 		if (error) {
-			/* for hard failures return the first slot. */
+			/*
+			 * ENOMEM indicates a shortage of resources in
+			 * which case no I/O have been initiated for the
+			 * given cluster.
+			 */
 			if (error != ENOMEM && i == 0) {
 				if (pg->uobject != NULL) {
 					slot = uao_find_swslot(pg->uobject,
@@ -652,8 +693,25 @@ uvm_swap_dropcluster(struct vm_page **pgs, int npages, int error)
 				} else {
 					slot = pg->uanon->an_swslot;
 				}
+				/* for hard failures return the first slot. */
 				KASSERT(slot);
 			}
+#ifdef UVM_SWAP_ENCRYPT
+			/* IO failed, decrypt the page before unbusying it. */
+			if (error != ENOMEM && (pg->pg_flags & PQ_ENCRYPT)) {
+				caddr_t data;
+				int rv;
+
+				if (sdp == NULL)
+					sdp = uvm_swap_getsdp(slot);
+
+				data = (caddr_t)(kva + (vsize_t)i * PAGE_SIZE);
+				rv = uvm_swap_decryptpg(sdp, data, data,
+				    slot + i);
+				KASSERT(rv == 0);
+				atomic_clearbits_int(&pg->pg_flags, PQ_ENCRYPT);
+			}
+#endif
 			/*
 			 * for failed swap-backed pageouts we need to
 			 * reset pg's swslot to 0.
@@ -663,20 +721,15 @@ uvm_swap_dropcluster(struct vm_page **pgs, int npages, int error)
 				    pg->offset >> PAGE_SHIFT, 0);
 			else
 				pg->uanon->an_swslot = 0;
-		}
-
-		anon_disposed = (pg->pg_flags & PG_RELEASED) != 0;
-		KASSERT(!anon_disposed || pg->uobject != NULL ||
-		    pg->uanon->an_ref == 0);
-
-		/*
-		 * if we are operating on behalf of the pagedaemon and
-		 * we had a successful pageout update the page!
-		 */
-		if (!error) {
-			pmap_clear_reference(pg);
-			pmap_clear_modify(pg);
-			atomic_setbits_int(&pg->pg_flags, PG_CLEAN);
+		} else {
+			/*
+			 * The page has been successfully written to swap.
+			 * Release it now: mark it PG_RELEASED and let
+			 * uvm_page_unbusy() free it.
+			 */
+			atomic_setbits_int(&pg->pg_flags, PG_RELEASED);
+			freed++;
+			swpgonly++;
 		}
 
 		if (pg->uobject == NULL && anon_disposed) {
@@ -687,6 +740,9 @@ uvm_swap_dropcluster(struct vm_page **pgs, int npages, int error)
 		}
 		rw_exit(slock);
 	}
+
+	atomic_add_int(&uvmexp.pdfreed, freed);
+	atomic_add_int(&uvmexp.swpgonly, swpgonly);
 
 	return slot;
 }
@@ -699,29 +755,21 @@ void
 uvm_aio_aiodone(struct buf *bp)
 {
 	int npages = bp->b_bufsize >> PAGE_SHIFT;
-	struct vm_page *pgs[MAXPHYS >> PAGE_SHIFT];
+	struct vm_page *pgs[SWCLUSTPAGES];
 	int i, error, slot;
+	vaddr_t kva;
 
-	KASSERT(npages <= MAXPHYS >> PAGE_SHIFT);
+	KASSERT(npages <= SWCLUSTPAGES);
 	KASSERT((bp->b_flags & B_READ) == 0);
 	splassert(IPL_BIO);
 
 	error = (bp->b_flags & B_ERROR) ? EIO : 0;
+	kva = (vaddr_t)bp->b_data;
 	for (i = 0; i < npages; i++)
-		pgs[i] = uvm_atopg((vaddr_t)bp->b_data +
-		    ((vsize_t)i << PAGE_SHIFT));
-	uvm_pagermapout((vaddr_t)bp->b_data, npages);
-#ifdef UVM_SWAP_ENCRYPT
-	/*
-	 * XXX - assumes that we only get ASYNC writes. used to be above.
-	 */
-	if (pgs[0]->pg_flags & PQ_ENCRYPT) {
-		uvm_swap_freepages(pgs, npages);
-		goto freed;
-	}
-#endif /* UVM_SWAP_ENCRYPT */
+		pgs[i] = uvm_atopg(kva + ((vsize_t)i << PAGE_SHIFT));
+	slot = uvm_swap_dropcluster(pgs, npages, error, kva);
+	uvm_pagermapout(kva, npages);
 
-	slot = uvm_swap_dropcluster(pgs, npages, error);
 	/*
 	 * for hard errors on swap-backed pageouts, mark the swslots as
 	 * bad.  note that we do not free swslots that we mark bad.
@@ -730,8 +778,5 @@ uvm_aio_aiodone(struct buf *bp)
 		/* XXX daddr_t -> int */
 		uvm_swap_markbad(slot, npages);
 	}
-#ifdef UVM_SWAP_ENCRYPT
-freed:
-#endif
 	pool_put(&bufpool, bp);
 }
