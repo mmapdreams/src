@@ -130,6 +130,8 @@ int	ena_setup_interrupts(struct ena_softc *, struct pci_attach_args *);
 void	ena_setup_ifp(struct ena_softc *, uint8_t *);
 unsigned int ena_calc_max_io_queues(struct ena_softc *,
 	    struct ena_com_dev_get_features_ctx *);
+int	ena_calc_io_queue_size(struct ena_softc *,
+	    struct ena_com_dev_get_features_ctx *);
 int	ena_rss_init(struct ena_softc *);
 void	ena_rss_configure(struct ena_softc *);
 
@@ -389,13 +391,14 @@ ena_attach(struct device *parent, struct device *self, void *aux)
 	/*
 	 * Queue sizing.  The number of IO queues is bounded by the device's
 	 * advertised maximum, the available MSI-X vectors and the CPU count
-	 * (see ena_setup_interrupts).  Clamp ring depth to a power of two.
+	 * (see ena_setup_interrupts); ring depth by what the device accepts.
 	 */
-	sc->sc_tx_ring_size = ENA_DEFAULT_TX_DESC;
-	sc->sc_rx_ring_size = ENA_DEFAULT_RX_DESC;
 	sc->sc_max_mtu = feat.dev_attr.max_mtu;
 	sc->sc_tx_offload_cap = feat.offload.tx;
 	sc->sc_max_io_queues = ena_calc_max_io_queues(sc, &feat);
+
+	if (ena_calc_io_queue_size(sc, &feat) != 0)
+		goto destroy_dev;
 
 	if (ena_setup_interrupts(sc, pa) != 0) {
 		printf(": interrupt setup failed\n");
@@ -786,6 +789,66 @@ ena_calc_max_io_queues(struct ena_softc *sc,
 		n = 1;
 
 	return (n);
+}
+
+/*
+ * Ring depth the device will accept, as a power of two.  TX and RX are sized
+ * separately because a device may advertise different maxima for them: each
+ * direction is bounded by the shallower of its submission and completion
+ * queue.  Ring depth must be a power of two, so the advertised maximum is
+ * rounded down rather than used directly.
+ */
+int
+ena_calc_io_queue_size(struct ena_softc *sc,
+    struct ena_com_dev_get_features_ctx *feat)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	unsigned int tx_max, rx_max;
+
+	if (ena_dev->supported_features & BIT(ENA_ADMIN_MAX_QUEUES_EXT)) {
+		struct ena_admin_queue_ext_feature_fields *ext =
+		    &feat->max_queue_ext.max_queue_ext;
+
+		tx_max = MIN(ext->max_tx_sq_depth, ext->max_tx_cq_depth);
+		rx_max = MIN(ext->max_rx_sq_depth, ext->max_rx_cq_depth);
+	} else {
+		tx_max = MIN(feat->max_queues.max_sq_depth,
+		    feat->max_queues.max_cq_depth);
+		rx_max = tx_max;
+	}
+
+	if (tx_max == 0 || rx_max == 0) {
+		printf(": device advertises no ring depth\n");
+		return (1);
+	}
+
+	if (!powerof2(tx_max))
+		tx_max = 1U << (fls(tx_max) - 1);
+	if (!powerof2(rx_max))
+		rx_max = 1U << (fls(rx_max) - 1);
+
+	sc->sc_tx_ring_size = MIN(ENA_DEFAULT_TX_DESC, tx_max);
+	sc->sc_rx_ring_size = MIN(ENA_DEFAULT_RX_DESC, rx_max);
+
+	/*
+	 * Below this the RX ring cannot hold the low-water mark that
+	 * ena_init() seeds it with, so refill would never make progress.
+	 */
+	if (sc->sc_tx_ring_size < ENA_MIN_RING_SIZE ||
+	    sc->sc_rx_ring_size < ENA_MIN_RING_SIZE) {
+		printf(": ring depth %u tx / %u rx below the minimum %u\n",
+		    sc->sc_tx_ring_size, sc->sc_rx_ring_size,
+		    ENA_MIN_RING_SIZE);
+		return (1);
+	}
+
+	if (sc->sc_tx_ring_size != ENA_DEFAULT_TX_DESC ||
+	    sc->sc_rx_ring_size != ENA_DEFAULT_RX_DESC) {
+		printf(": %u tx / %u rx descriptors", sc->sc_tx_ring_size,
+		    sc->sc_rx_ring_size);
+	}
+
+	return (0);
 }
 
 /*
