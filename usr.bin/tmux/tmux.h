@@ -1,4 +1,4 @@
-/* $OpenBSD: tmux.h,v 1.1425 2026/08/17 20:04:00 nicm Exp $ */
+/* $OpenBSD: tmux.h,v 1.1431 2026/08/25 08:37:08 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -474,6 +474,7 @@ enum tty_code_code {
 	TTYC_ICH1,
 	TTYC_IL,
 	TTYC_IL1,
+	TTYC_IND,
 	TTYC_INDN,
 	TTYC_INVIS,
 	TTYC_KCBT,
@@ -1301,6 +1302,8 @@ struct window_pane {
 #define PANE_CMDRUNNING 0x20000
 #define PANE_ACTIVITY 0x40000
 #define PANE_CLOSEONCLICK 0x80000
+#define PANE_CAPTUREALLKEYS 0x100000
+#define PANE_FLOATOVERZOOM 0x200000
 
 	bitstr_t	*sync_dirty;
 	u_int		 sync_dirty_size;
@@ -1407,6 +1410,7 @@ struct window {
 	struct window_pane	*active;
 	struct window_pane	*modal;
 	struct window_pane	*modal_last;
+	struct window_pane	*was_zoomed;
 	struct window_panes 	 last_panes;
 	struct window_panes      z_index;
 	struct window_panes	 panes;
@@ -1449,7 +1453,6 @@ struct window {
 #define WINDOW_ZOOMED 0x8
 #define WINDOW_WASZOOMED 0x10
 #define WINDOW_RESIZE 0x20
-#define WINDOW_WASMODALZOOMED 0x40
 #define WINDOW_ALERTFLAGS (WINDOW_BELL|WINDOW_ACTIVITY|WINDOW_SILENCE)
 
 	int			 alerts_queued;
@@ -1774,8 +1777,9 @@ struct tty {
 #define TTY_WAITFG 0x2000
 #define TTY_WAITBG 0x4000
 #define TTY_BRACKETPASTE 0x8000
+#define TTY_HAVESYNC 0x10000
 #define TTY_ALL_REQUEST_FLAGS \
-	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA)
+	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA|TTY_HAVESYNC)
 	int		 flags;
 
 	struct tty_term	*term;
@@ -2246,7 +2250,7 @@ struct client {
 #define CLIENT_STARTSERVER 0x10000000
 #define CLIENT_REDRAWMENU 0x20000000
 #define CLIENT_NOFORK 0x40000000
-/* 0x80000000ULL unused */
+#define CLIENT_REDRAWSCROLLBARS 0x80000000ULL
 #define CLIENT_CONTROL_PAUSEAFTER 0x100000000ULL
 #define CLIENT_CONTROL_WAITEXIT 0x200000000ULL
 #define CLIENT_WINDOWSIZECHANGED 0x400000000ULL
@@ -2492,6 +2496,7 @@ struct spawn_context {
 #define SPAWN_HORIZONTAL 0x200
 #define SPAWN_SPLIT 0x400
 #define SPAWN_MODAL 0x800
+#define SPAWN_FLOATOVERZOOM 0x1000
 };
 
 /* Paste buffer. */
@@ -3680,8 +3685,8 @@ void		 window_resize(struct window *, u_int, u_int, int, int);
 void		 window_pane_send_resize(struct window_pane *, u_int, u_int);
 int		 window_zoom(struct window_pane *);
 int		 window_unzoom(struct window *, int);
-void		 window_push_modal_zoom(struct window *);
-int		 window_pop_modal_zoom(struct window *);
+int		 window_active_pane_is_over_zoom(struct window *);
+struct window_pane *window_zoomed_pane(struct window *);
 int		 window_push_zoom(struct window *, int, int);
 int		 window_pop_zoom(struct window *);
 void		 window_lost_pane(struct window *, struct window_pane *);
@@ -3986,6 +3991,7 @@ void	control_set_pane_on(struct client *, struct window_pane *);
 void	control_set_pane_off(struct client *, struct window_pane *);
 void	control_continue_pane(struct client *, struct window_pane *);
 void	control_pause_pane(struct client *, struct window_pane *);
+void	control_reset_pane(struct client *, struct window_pane *);
 void	control_set_window_size(struct client *, u_int, u_int, u_int);
 int	control_get_window_size(struct client *, u_int, u_int *, u_int *);
 void	control_clear_window_size(struct client *, u_int);

@@ -1,4 +1,4 @@
-#	$OpenBSD: airport,v 1.107 2026/02/11 20:38:50 mlarkin Exp $
+#	$OpenBSD: airport,v 1.110 2026/08/23 21:10:41 kirill Exp $
 #	@(#)airport	8.1 (Berkeley) 6/8/93
 #
 # Only use the IATA airport codes, and only add ones you have been to.
@@ -780,10 +780,11 @@ IQQ:Chucumata, Iquique, Chile
 IQT:Cf Secada, Iquitos, Peru
 ISB:Islamabad International, Pakistan
 ISC:Tresco, Isles Of Scilly, United Kingdom
+ISL:Ataturk International Istanbul, Turkey
 ISN:Sloulin Field International, Williston, North Dakota, USA
 ISO:Kinston, North Carolina, USA
 ISP:Long Island MacArthur, New York, USA
-IST:Ataturk International Istanbul, Turkey
+IST:Istanbul Airport, Turkey
 ITH:Ithaca Tompkins County, New York, USA
 ITM:Itami International, Osaka, Japan
 ITO:Hilo General Lyman Field, Hawaii, USA
@@ -1449,6 +1450,7 @@ REX:General Lucio Blanco, Reynosa, Tamaulipas, Mexico
 RFD:Greater Rockford, Illinois, USA
 RGA:Rio Grande, Tierra Del Fuego, Argentina
 RGN:Mingaladon, Yangon, Myanmar
+RGK:Gorno-Altaysk, Russia
 RHI:Rhinelander Oneida County, Wisconsin, USA
 RHO:Paradisi, Rhodes, Greece
 RHV:Reid-Hillview Airport, San Jose, California, USA
@@ -1818,6 +1820,7 @@ VDZ:Valdez, Alaska, USA
 VER:Las Bajadas / General Heriberto Jara, Veracruz, Mexico
 VEY:Vestmannaeyjar, Iceland
 VFA:Victoria Falls, Zimbabwe
+VDE:El Hierro, Spain
 VGO:Vigo, Spain
 VGT:North Air Terminal, Las Vegas, Nevada, USA
 VHM:Vilhelmina, Sweden

@@ -1,4 +1,4 @@
-/*	$OpenBSD: sha256.c,v 1.1 2026/07/15 13:39:15 jsing Exp $	*/
+/*	$OpenBSD: sha256.c,v 1.4 2026/08/21 15:46:01 jsing Exp $	*/
 /*
  * Copyright (c) 2023, 2026 Joel Sing <jsing@openbsd.org>
  *
@@ -23,6 +23,15 @@
 #include <string.h>
 
 #include <sha2.h>
+
+#ifndef SHA256_SMALL
+#if defined(__aarch64__)
+#define HAVE_SHA256_BLOCK
+#elif defined(__amd64__)
+#define HAVE_SHA256_BLOCK
+#define HAVE_SHA256_BLOCK_GENERIC
+#endif
+#endif
 
 static inline void
 crypto_store_htobe32(uint8_t *dst, uint32_t v)
