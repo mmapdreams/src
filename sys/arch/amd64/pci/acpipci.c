@@ -269,6 +269,7 @@ acpipci_attach_bus(struct device *parent, struct acpipci_softc *sc)
 	    PCI_SUBCLASS(class) != PCI_SUBCLASS_BRIDGE_HOST &&
 	    PCI_VENDOR(id) != PCI_VENDOR_AMD &&
 	    PCI_VENDOR(id) != PCI_VENDOR_NVIDIA &&
+	    PCI_VENDOR(id) != PCI_VENDOR_AMAZON &&
 	    PCI_VENDOR(id) != PCI_VENDOR_INTEL)
 		pba.pba_flags &= ~PCI_FLAGS_MSI_ENABLED;
 
