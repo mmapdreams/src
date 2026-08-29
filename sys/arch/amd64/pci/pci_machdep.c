@@ -691,15 +691,27 @@ pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp)
 {
 	pci_chipset_tag_t pc = pa->pa_pc;
 	pcitag_t tag = pa->pa_tag;
-	pcireg_t reg;
+	pcireg_t reg, table, type;
+	int bir, off;
 
 	KASSERT(PCI_MSI_VEC(vec) == vec);
 
 	if ((pa->pa_flags & PCI_FLAGS_MSI_ENABLED) == 0 || mp_busses == NULL ||
-	    pci_get_capability(pc, tag, PCI_CAP_MSIX, NULL, &reg) == 0)
+	    pci_get_capability(pc, tag, PCI_CAP_MSIX, &off, &reg) == 0)
 		return 1;
 
 	if (vec > PCI_MSIX_MC_TBLSZ(reg))
+		return 1;
+
+	/*
+	 * The table lives in a BAR that no driver maps, so firmware may
+	 * have left it unassigned.  Assign it now; msix_addroute() maps
+	 * it with no pci_attach_args to allocate from.
+	 */
+	table = pci_conf_read(pc, tag, off + PCI_MSIX_TABLE);
+	bir = PCI_MAPREG_START + (table & PCI_MSIX_TABLE_BIR) * 4;
+	type = pci_mapreg_type(pc, tag, bir);
+	if (pci_mapreg_assign(pa, bir, type, NULL, NULL))
 		return 1;
 
 	ihp->tag = PCI_MSI_PIN(tag, vec);
