@@ -123,6 +123,7 @@ int	ena_detach(struct device *, int);
 
 /* setup */
 int	ena_map_pci(struct ena_softc *, struct pci_attach_args *);
+void	ena_config_host_info(struct ena_softc *);
 int	ena_device_init(struct ena_softc *,
 	    struct ena_com_dev_get_features_ctx *);
 int	ena_setup_interrupts(struct ena_softc *, struct pci_attach_args *);
@@ -432,6 +433,7 @@ ena_attach(struct device *parent, struct device *self, void *aux)
 	return;
 
 destroy_dev:
+	ena_com_delete_host_info(ena_dev);
 	ena_com_admin_destroy(ena_dev);
 	ena_com_mmio_reg_read_request_destroy(ena_dev);
 free_dev:
@@ -523,6 +525,7 @@ ena_detach(struct device *self, int flags)
 	}
 
 	/* Tear down the admin queues and the mmio readless mechanism. */
+	ena_com_delete_host_info(ena_dev);
 	ena_com_admin_destroy(ena_dev);
 	ena_com_mmio_reg_read_request_destroy(ena_dev);
 
@@ -565,6 +568,38 @@ ena_map_pci(struct ena_softc *sc, struct pci_attach_args *pa)
 }
 
 /*
+ * Publish host attributes to the device (SET_HOST_ATTRIBUTES), which is what
+ * declares the ENA spec version the driver speaks.  Newer ENA generations
+ * (m6i and later) refuse CREATE_CQ until this has been issued, so it must
+ * run before any IO queue is created.  FreeBSD and Linux both do it here.
+ */
+void
+ena_config_host_info(struct ena_softc *sc)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	struct ena_admin_host_info *hi;
+
+	if (ena_com_allocate_host_info(ena_dev) != 0) {
+		printf("%s: can't allocate host info\n", ENA_DEVNAME(sc));
+		return;
+	}
+
+	hi = ena_dev->host_attr.host_info;
+	hi->os_type = ENA_ADMIN_OS_FREEBSD;
+	hi->kernel_ver = osrelease[0];
+	strlcpy(hi->kernel_ver_str, osrelease, sizeof(hi->kernel_ver_str));
+	hi->os_dist = 0;
+	strlcpy(hi->os_dist_str, ostype, sizeof(hi->os_dist_str));
+	hi->driver_version = 1;
+	hi->num_cpus = ncpus;
+
+	if (ena_com_set_host_attributes(ena_dev) != 0) {
+		printf("%s: can't set host attributes\n", ENA_DEVNAME(sc));
+		ena_com_delete_host_info(ena_dev);
+	}
+}
+
+/*
  * Bring up the ena-com device: mirror FreeBSD's ena_device_init.  Admin runs
  * in polling mode through this path; the caller switches to interrupt-driven
  * admin after the MSI-X handlers are established.
@@ -604,6 +639,8 @@ ena_device_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 	/* Polled admin keeps the bring-up path free of wait-events. */
 	ena_com_set_admin_polling_mode(ena_dev, true);
 
+	ena_config_host_info(sc);
+
 	rc = ena_com_get_dev_attr_feat(ena_dev, feat);
 	if (rc != 0)
 		goto err_admin;
@@ -618,6 +655,7 @@ ena_device_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 	return (0);
 
 err_admin:
+	ena_com_delete_host_info(ena_dev);
 	ena_com_admin_destroy(ena_dev);
 err_mmio:
 	ena_com_mmio_reg_read_request_destroy(ena_dev);
