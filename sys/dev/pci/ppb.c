@@ -76,6 +76,12 @@ struct ppb_softc {
 	struct extent *sc_ioex;
 	struct extent *sc_memex;
 	struct extent *sc_pmemex;
+	/*
+	 * A subtractive-decode bridge forwards the parent's windows rather
+	 * than owning any, so sc_ioex/sc_memex can point at an extent this
+	 * bridge neither created nor named.  Detach must not destroy those.
+	 */
+	int sc_borrowed_ex;
 	struct device *sc_psc;
 	int sc_cap_off;
 	struct task sc_insert_task;
@@ -330,10 +336,14 @@ ppbattach(struct device *parent, struct device *self, void *aux)
 	}
 
 	if (interface == PPB_INTERFACE_SUBTRACTIVE) {
-		if (sc->sc_ioex == NULL)
+		if (sc->sc_ioex == NULL) {
 			sc->sc_ioex = pa->pa_ioex;
-		if (sc->sc_memex == NULL)
+			sc->sc_borrowed_ex = 1;
+		}
+		if (sc->sc_memex == NULL) {
 			sc->sc_memex = pa->pa_memex;
+			sc->sc_borrowed_ex = 1;
+		}
 	}
 
  attach:
@@ -382,13 +392,13 @@ ppbdetach(struct device *self, int flags)
 		free(name, M_DEVBUF, PPB_EXNAMLEN);
 	}
 
-	if (sc->sc_ioex) {
+	if (sc->sc_ioex && !sc->sc_borrowed_ex) {
 		name = sc->sc_ioex->ex_name;
 		extent_destroy(sc->sc_ioex);
 		free(name, M_DEVBUF, PPB_EXNAMLEN);
 	}
 
-	if (sc->sc_memex) {
+	if (sc->sc_memex && !sc->sc_borrowed_ex) {
 		name = sc->sc_memex->ex_name;
 		extent_destroy(sc->sc_memex);
 		free(name, M_DEVBUF, PPB_EXNAMLEN);
