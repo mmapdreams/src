@@ -147,6 +147,7 @@ struct ena_queue {
 	struct ena_tx_buf	*eq_tx_buf;	/* [tx_ring_size] */
 	uint16_t		*eq_tx_free_ids;
 	unsigned int		 eq_tx_ring_size;
+	unsigned int		 eq_tx_push_max;	/* 0 unless LLQ */
 	unsigned int		 eq_tx_prod;	/* next req_id to use */
 	unsigned int		 eq_tx_cons;	/* next completion to reap */
 
@@ -200,6 +201,7 @@ struct ena_softc {
 	/* BAR0 register window, wrapped for the HAL. */
 	struct ena_bus		 sc_bus;
 	bus_size_t		 sc_reg_ios;
+	bus_size_t		 sc_mem_ios;	/* 0 when BAR2 is absent */
 	bus_dma_tag_t		 sc_dmat;
 
 	/* ena-com device handle. */
