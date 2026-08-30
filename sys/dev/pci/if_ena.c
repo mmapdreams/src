@@ -124,6 +124,9 @@ int	ena_detach(struct device *, int);
 /* setup */
 int	ena_map_pci(struct ena_softc *, struct pci_attach_args *);
 void	ena_config_host_info(struct ena_softc *);
+void	ena_config_llq(struct ena_softc *,
+	    struct ena_com_dev_get_features_ctx *);
+unsigned int ena_tx_push_len(struct ena_queue *, struct mbuf *);
 int	ena_device_init(struct ena_softc *,
 	    struct ena_com_dev_get_features_ctx *);
 int	ena_setup_interrupts(struct ena_softc *, struct pci_attach_args *);
@@ -444,6 +447,11 @@ free_dev:
 	sc->sc_ena_dev = NULL;
 	bus_space_unmap(sc->sc_bus.reg_bar_t, sc->sc_bus.reg_bar_h,
 	    sc->sc_reg_ios);
+	if (sc->sc_mem_ios != 0) {
+		bus_space_unmap(sc->sc_bus.mem_bar_t, sc->sc_bus.mem_bar_h,
+		    sc->sc_mem_ios);
+		sc->sc_mem_ios = 0;
+	}
 }
 
 int
@@ -550,6 +558,11 @@ ena_detach(struct device *self, int flags)
 	sc->sc_ena_dev = NULL;
 	bus_space_unmap(sc->sc_bus.reg_bar_t, sc->sc_bus.reg_bar_h,
 	    sc->sc_reg_ios);
+	if (sc->sc_mem_ios != 0) {
+		bus_space_unmap(sc->sc_bus.mem_bar_t, sc->sc_bus.mem_bar_h,
+		    sc->sc_mem_ios);
+		sc->sc_mem_ios = 0;
+	}
 
 	return (0);
 }
@@ -567,7 +580,61 @@ ena_map_pci(struct ena_softc *sc, struct pci_attach_args *pa)
 		return (1);
 	}
 
+	/*
+	 * BAR2 is the Low Latency Queue descriptor window.  A device without
+	 * one cannot do device-memory placement, so failing to map it is not
+	 * an error: sc_mem_ios stays 0 and ena_config_llq() leaves TX in host
+	 * memory.  It is mapped LINEAR because the HAL addresses it through a
+	 * plain pointer, and PREFETCHABLE so the descriptor stores combine.
+	 */
+	memtype = pci_mapreg_type(pa->pa_pc, pa->pa_tag, ENA_MEM_BAR);
+	if (pci_mapreg_map(pa, ENA_MEM_BAR, memtype, BUS_SPACE_MAP_LINEAR |
+	    BUS_SPACE_MAP_PREFETCHABLE, &sc->sc_bus.mem_bar_t,
+	    &sc->sc_bus.mem_bar_h, NULL, &sc->sc_mem_ios, 0) != 0)
+		sc->sc_mem_ios = 0;
+
 	return (0);
+}
+
+/*
+ * Select a TX placement policy.  Devices from the m8i generation on refuse
+ * CREATE_SQ for host-memory placement (admin status 6) and accept only the
+ * Low Latency Queue, where the descriptor list and packet header live in
+ * device memory behind BAR2.  Older generations accept either.
+ *
+ * The device advertises what it supports; ena_com_config_dev_mode() picks a
+ * configuration and leaves tx_mem_queue_type at HOST when there is no LLQ.
+ * Without a mapped BAR2 there is nowhere to put the descriptors, so that case
+ * stays on host memory too.
+ */
+void
+ena_config_llq(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	struct ena_llq_configurations cfg;
+
+	if (sc->sc_mem_ios == 0) {
+		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
+		return;
+	}
+
+	ena_dev->mem_bar = bus_space_vaddr(sc->sc_bus.mem_bar_t,
+	    sc->sc_bus.mem_bar_h);
+	if (ena_dev->mem_bar == NULL) {
+		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
+		return;
+	}
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.llq_header_location = ENA_ADMIN_INLINE_HEADER;
+	cfg.llq_stride_ctrl = ENA_ADMIN_MULTIPLE_DESCS_PER_ENTRY;
+	cfg.llq_num_decs_before_header =
+	    ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2;
+	cfg.llq_ring_entry_size = ENA_ADMIN_LIST_ENTRY_SIZE_128B;
+	cfg.llq_ring_entry_size_value = 128;
+
+	if (ena_com_config_dev_mode(ena_dev, &feat->llq, &cfg) != 0)
+		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
 }
 
 /*
@@ -654,6 +721,8 @@ ena_device_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 	rc = ena_com_set_aenq_config(ena_dev, aenq_groups);
 	if (rc != 0)
 		goto err_admin;
+
+	ena_config_llq(sc, feat);
 
 	return (0);
 
@@ -1264,7 +1333,7 @@ ena_create_io_queues(struct ena_softc *sc)
 		/* TX queue. */
 		memset(&ctx, 0, sizeof(ctx));
 		qid = ENA_IO_TXQ_IDX(i);
-		ctx.mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
+		ctx.mem_queue_type = ena_dev->tx_mem_queue_type;
 		ctx.direction = ENA_COM_IO_QUEUE_DIRECTION_TX;
 		ctx.qid = qid;
 		ctx.msix_vector = eq->eq_intr;
@@ -1278,6 +1347,19 @@ ena_create_io_queues(struct ena_softc *sc)
 		if (rc != 0) {
 			ena_com_destroy_io_queue(ena_dev, qid);
 			goto destroy;
+		}
+
+		/*
+		 * Under LLQ the header is written into device memory instead
+		 * of being read over DMA, up to what the negotiated entry
+		 * size leaves room for.
+		 */
+		eq->eq_tx_push_max = ena_dev->tx_mem_queue_type ==
+		    ENA_ADMIN_PLACEMENT_POLICY_DEV ?
+		    eq->eq_tx_sq->tx_max_header_size : 0;
+		if (eq->eq_tx_push_max > 0 && eq->eq_tx_push_buf == NULL) {
+			eq->eq_tx_push_buf = malloc(eq->eq_tx_push_max,
+			    M_DEVBUF, M_WAITOK | M_ZERO);
 		}
 
 		/* RX queue. */
@@ -1631,9 +1713,12 @@ ena_tx_csum(struct ena_com_tx_ctx *tx_ctx, struct mbuf *m)
 	struct ether_extracted ext;
 	int csum_flags = m->m_pkthdr.csum_flags;
 
-	if (!ISSET(csum_flags, M_IPV4_CSUM_OUT | M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
-		return;
-
+	/*
+	 * The geometry is filled in even with no checksum requested, because a
+	 * device that negotiated LLQ with meta caching disabled takes a
+	 * metadata descriptor on EVERY packet and reads these fields from it.
+	 * Leaving them zero describes a packet with no L3 header at all.
+	 */
 	ether_extract_headers(m, &ext);
 
 	if (ext.ip4 != NULL) {
@@ -1646,7 +1731,16 @@ ena_tx_csum(struct ena_com_tx_ctx *tx_ctx, struct mbuf *m)
 		tx_ctx->l3_proto = ENA_ETH_IO_L3_PROTO_IPV6;
 		tx_ctx->df = 1;
 	} else {
-		/* Not an IP packet we can describe; send without offload. */
+		/*
+		 * Not an IP packet we can describe.  ARP and friends still
+		 * need a valid metadata descriptor under LLQ, and the device
+		 * reads no L3 fields for an unknown L3 protocol.
+		 */
+		tx_ctx->l3_proto = ENA_ETH_IO_L3_PROTO_UNKNOWN;
+		tx_ctx->l4_proto = ENA_ETH_IO_L4_PROTO_UNKNOWN;
+		tx_ctx->ena_meta.l3_hdr_offset = ext.evh != NULL ?
+		    ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN : ETHER_HDR_LEN;
+		tx_ctx->meta_valid = 1;
 		return;
 	}
 
@@ -1674,6 +1768,23 @@ ena_tx_csum(struct ena_com_tx_ctx *tx_ctx, struct mbuf *m)
 	tx_ctx->meta_valid = 1;
 }
 
+/*
+ * How many leading bytes LLQ pushes into device memory.  The device is told a
+ * fixed header length -- everything up to what the negotiated entry has room
+ * for -- rather than a protocol boundary: the reference driver sends
+ * min(pkthdr.len, tx_max_header_size) and the device parses the headers out of
+ * that itself.  Handing it a shorter, protocol-aligned push makes it drop the
+ * packet silently.
+ */
+unsigned int
+ena_tx_push_len(struct ena_queue *eq, struct mbuf *m)
+{
+	if (eq->eq_tx_push_max == 0)
+		return (0);
+
+	return (MIN(eq->eq_tx_push_max, m->m_pkthdr.len));
+}
+
 int
 ena_encap(struct ena_queue *eq, struct mbuf *m)
 {
@@ -1682,51 +1793,104 @@ ena_encap(struct ena_queue *eq, struct mbuf *m)
 	struct ena_tx_buf *tb;
 	bus_dmamap_t map;
 	uint16_t req_id;
-	int nb_hw_desc, rc, i;
+	int nb_hw_desc, rc, i, push, push_len;
 
 	req_id = eq->eq_tx_free_ids[eq->eq_tx_prod];
 	tb = &eq->eq_tx_buf[req_id];
 	map = tb->etx_map;
 
-	rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
-	    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
-	if (rc == EFBIG) {
-		if (m_defrag(m, M_DONTWAIT) != 0)
-			return (ENOBUFS);
-		rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
-		    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
-	}
-	if (rc != 0)
-		return (ENOBUFS);
-
-	bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-	    BUS_DMASYNC_PREWRITE);
-
-	for (i = 0; i < map->dm_nsegs; i++) {
-		tb->etx_bufs[i].paddr = map->dm_segs[i].ds_addr;
-		tb->etx_bufs[i].len = map->dm_segs[i].ds_len;
-	}
+	/*
+	 * Copy the pushed bytes into a per-queue buffer rather than pulling them
+	 * up in the mbuf: the push is a fixed length that can exceed the whole
+	 * packet, which m_pullup(9) cannot satisfy.
+	 *
+	 * A packet that fits entirely inside the push needs no DMA at all --
+	 * the device already has every byte -- so it is not mapped, and
+	 * ena_com_prepare_tx() takes it as a packet on the strength of the push
+	 * alone.  Anything longer is mapped and the first eq_tx_push_max bytes
+	 * are skipped when the descriptor list is built, so the device is not
+	 * told to fetch them a second time.
+	 */
+	push = push_len = ena_tx_push_len(eq, m);
+	if (push_len > 0)
+		m_copydata(m, 0, push_len, eq->eq_tx_push_buf);
 
 	memset(&tx_ctx, 0, sizeof(tx_ctx));
 	tx_ctx.ena_bufs = tb->etx_bufs;
-	tx_ctx.num_bufs = map->dm_nsegs;
 	tx_ctx.req_id = req_id;
+	tx_ctx.num_bufs = 0;
+	map->dm_nsegs = 0;
+
+	if (push_len > 0 && m->m_pkthdr.len <= push_len) {
+		/* Wholly pushed: nothing left to describe. */
+	} else {
+		rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
+		    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
+		if (rc == EFBIG) {
+			if (m_defrag(m, M_DONTWAIT) != 0)
+				return (ENOBUFS);
+			rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
+			    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
+		}
+		if (rc != 0)
+			return (ENOBUFS);
+
+		bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
+		    BUS_DMASYNC_PREWRITE);
+
+		for (i = 0; i < map->dm_nsegs; i++) {
+			bus_addr_t addr = map->dm_segs[i].ds_addr;
+			bus_size_t len = map->dm_segs[i].ds_len;
+
+			if (push > 0) {
+				if (len <= push) {
+					push -= len;
+					continue;
+				}
+				addr += push;
+				len -= push;
+				push = 0;
+			}
+			tb->etx_bufs[tx_ctx.num_bufs].paddr = addr;
+			tb->etx_bufs[tx_ctx.num_bufs].len = len;
+			tx_ctx.num_bufs++;
+		}
+	}
+
+	if (push_len > 0) {
+		tx_ctx.push_header = eq->eq_tx_push_buf;
+		tx_ctx.header_len = push_len;
+	}
 
 	ena_tx_csum(&tx_ctx, m);
 
 	if (!ena_com_sq_have_enough_space(eq->eq_tx_sq,
-	    map->dm_nsegs + 1)) {
-		bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-		    BUS_DMASYNC_POSTWRITE);
-		bus_dmamap_unload(sc->sc_dmat, map);
+	    tx_ctx.num_bufs + 1)) {
+		if (map->dm_nsegs > 0) {
+			bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
+			    BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, map);
+		}
 		return (ENOBUFS);
+	}
+
+	/*
+	 * An LLQ device takes only a bounded number of entries between
+	 * doorbells and refuses the write once that budget is spent, so ring
+	 * early when this packet would exceed it; the write replenishes it.
+	 */
+	if (ena_com_is_doorbell_needed(eq->eq_tx_sq, &tx_ctx)) {
+		ena_com_write_sq_doorbell(eq->eq_tx_sq);
+		eq->eq_kst_tx_doorbells++;
 	}
 
 	rc = ena_com_prepare_tx(eq->eq_tx_sq, &tx_ctx, &nb_hw_desc);
 	if (rc != 0) {
-		bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-		    BUS_DMASYNC_POSTWRITE);
-		bus_dmamap_unload(sc->sc_dmat, map);
+		if (map->dm_nsegs > 0) {
+			bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
+			    BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, map);
+		}
 		return (ENOBUFS);
 	}
 
@@ -1751,7 +1915,13 @@ ena_start(struct ifqueue *ifq)
 	}
 
 	for (;;) {
-		if (ena_com_free_q_entries(eq->eq_tx_sq) < ENA_PKT_MAX_BUFS + 2) {
+		/*
+		 * Under LLQ several descriptors share one ring entry, so the
+		 * free-entry count is not a descriptor count; this helper
+		 * accounts for the policy.
+		 */
+		if (!ena_com_sq_have_enough_space(eq->eq_tx_sq,
+		    ENA_PKT_MAX_BUFS + 2)) {
 			ifq_set_oactive(ifq);
 			break;
 		}
@@ -1805,9 +1975,11 @@ ena_txeof(struct ena_queue *eq)
 
 		tb = &eq->eq_tx_buf[req_id];
 
-		bus_dmamap_sync(sc->sc_dmat, tb->etx_map, 0,
-		    tb->etx_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
-		bus_dmamap_unload(sc->sc_dmat, tb->etx_map);
+		if (tb->etx_map->dm_nsegs > 0) {
+			bus_dmamap_sync(sc->sc_dmat, tb->etx_map, 0,
+			    tb->etx_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, tb->etx_map);
+		}
 		m_freem(tb->etx_mbuf);
 		tb->etx_mbuf = NULL;
 
