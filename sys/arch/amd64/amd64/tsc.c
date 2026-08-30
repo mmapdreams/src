@@ -102,7 +102,7 @@ tsc_freq_cpuid(struct cpu_info *ci)
 uint64_t
 tsc_freq_msr(struct cpu_info *ci)
 {
-	uint64_t base, def, divisor, multiplier;
+	uint64_t base, def, hwcr, divisor, multiplier;
 
 	if (ci->ci_vendor != CPUV_AMD)
 		return 0;
@@ -114,7 +114,9 @@ tsc_freq_msr(struct cpu_info *ci)
 	 */
 	if (ci->ci_family < 0x10)
 		return 0;
-	if (!ISSET(rdmsr(MSR_HWCR), HWCR_TSCFREQSEL))
+	if (rdmsr_safe(MSR_HWCR, &hwcr) != 0)
+		return 0;
+	if (!ISSET(hwcr, HWCR_TSCFREQSEL))
 		return 0;
 
 	/*
@@ -122,8 +124,12 @@ tsc_freq_msr(struct cpu_info *ci)
 	 * and frequency for each core P-state.  We want the P0 frequency.
 	 * If the En bit isn't set, the register doesn't define a valid
 	 * P-state.
+	 *
+	 * A hypervisor may leave either MSR unimplemented -- an EC2 guest on
+	 * an AMD host faults on PStateDef -- so both reads are guarded.
 	 */
-	def = rdmsr(MSR_PSTATEDEF(0));
+	if (rdmsr_safe(MSR_PSTATEDEF(0), &def) != 0)
+		return 0;
 	if (!ISSET(def, PSTATEDEF_EN))
 		return 0;
 
