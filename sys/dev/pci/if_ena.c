@@ -689,11 +689,14 @@ ena_config_host_info(struct ena_softc *sc)
 {
 	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
 	struct ena_admin_host_info *hi;
+	int bus, dev, func;
 
 	if (ena_com_allocate_host_info(ena_dev) != 0) {
 		printf("%s: can't allocate host info\n", ENA_DEVNAME(sc));
 		return;
 	}
+
+	pci_decompose_tag(sc->sc_pc, sc->sc_tag, &bus, &dev, &func);
 
 	hi = ena_dev->host_attr.host_info;
 	hi->os_type = ENA_ADMIN_OS_FREEBSD;
@@ -703,6 +706,19 @@ ena_config_host_info(struct ena_softc *sc)
 	strlcpy(hi->os_dist_str, ostype, sizeof(hi->os_dist_str));
 	hi->driver_version = 1;
 	hi->num_cpus = ncpus;
+
+	/*
+	 * Where the device sits, and the optional datapath features it may
+	 * only enable once the driver has said it implements them.  Only claim
+	 * what this port actually does: the RX descriptor offset and a
+	 * configurable RSS hash key.  ena_com_allocate_host_info() has already
+	 * filled in ena_spec_version.
+	 */
+	hi->bdf = (bus << ENA_ADMIN_HOST_INFO_BUS_SHIFT) |
+	    (dev << ENA_ADMIN_HOST_INFO_DEVICE_SHIFT) | func;
+	hi->driver_supported_features =
+	    ENA_ADMIN_HOST_INFO_RX_OFFSET_MASK |
+	    ENA_ADMIN_HOST_INFO_RSS_CONFIGURABLE_FUNCTION_KEY_MASK;
 
 	if (ena_com_set_host_attributes(ena_dev) != 0) {
 		printf("%s: can't set host attributes\n", ENA_DEVNAME(sc));
