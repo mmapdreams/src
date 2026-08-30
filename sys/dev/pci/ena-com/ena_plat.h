@@ -392,10 +392,18 @@ ena_reg_read32(struct ena_bus *bus, bus_size_t offset)
 		(virt) = NULL;						\
 	} while (0)
 
-/* Register R/W against BAR0 via bus_space. */
+/*
+ * Register R/W against BAR0 via bus_space.
+ *
+ * The barrier has to be a real store fence rather than a compiler barrier.
+ * An LLQ descriptor is written into a write-combining BAR mapping and the
+ * doorbell is a separate uncached MMIO store, so without draining the WC
+ * buffers first the device can see the doorbell before the descriptors it
+ * advertises.  membar_producer() compiles to nothing on amd64.
+ */
 #define ENA_REG_WRITE32(bus, value, offset)				\
 	do {								\
-		membar_producer();					\
+		membar_sync();						\
 		ENA_REG_WRITE32_RELAXED(bus, value, offset);		\
 	} while (0)
 
@@ -450,7 +458,12 @@ ena_reg_read32(struct ena_bus *bus, bus_size_t offset)
 #define dma_rmb()	membar_consumer()
 #define mmiowb()	membar_producer()
 #define mb()		membar_sync()
-#define wmb()		membar_producer()
+/*
+ * The HAL calls wmb() to close a bounce buffer before copying it into the
+ * write-combining LLQ window, which needs a real store fence for the same
+ * reason ENA_REG_WRITE32() does.
+ */
+#define wmb()		membar_sync()
 #define rmb()		membar_consumer()
 
 #ifndef ACCESS_ONCE
