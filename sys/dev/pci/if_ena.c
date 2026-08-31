@@ -1781,6 +1781,19 @@ ena_tx_csum(struct ena_com_tx_ctx *tx_ctx, struct mbuf *m)
 	tx_ctx->ena_meta.l3_hdr_offset = ext.evh != NULL ?
 	    ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN : ETHER_HDR_LEN;
 	tx_ctx->ena_meta.l3_hdr_len = ext.iphlen;
+
+	/*
+	 * The L4 header length, in 32-bit words, is part of the metadata
+	 * descriptor the device reads for every packet.  Leaving it zero
+	 * describes a transport header of no length, which a device is
+	 * entitled to reject.  UDP is fixed at two words; TCP carries its own
+	 * length and ether_extract_headers() has already validated it.
+	 */
+	if (ext.tcp != NULL)
+		tx_ctx->ena_meta.l4_hdr_len = ext.tcphlen >> 2;
+	else if (ext.udp != NULL)
+		tx_ctx->ena_meta.l4_hdr_len = sizeof(*ext.udp) >> 2;
+
 	tx_ctx->meta_valid = 1;
 }
 
