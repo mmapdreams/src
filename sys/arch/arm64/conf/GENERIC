@@ -407,6 +407,12 @@ cduart*		at fdt?
 ppb*		at pci?			# PCI-PCI bridges
 pci*		at ppb?
 
+# PCI serial.  The EC2 arm64 console is a PCI 16550 (1d0f:8250) rather than
+# an ACPI or FDT device, so without puc(4) there is no /dev/console at all and
+# init cannot start.
+puc*		at pci?			# PCI "universal" communication device
+com*		at puc?
+
 # PCI Ethernet
 aq*		at pci?			# Aquantia aQtion Ethernet
 bnxt*		at pci?			# Broadcom BCM573xx, BCM574xx
