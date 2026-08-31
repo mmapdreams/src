@@ -703,6 +703,7 @@
 #define	PCI_PRODUCT_ALTIMA_AC1003	0x03eb		/* AC1003 */
 
 /* Amazon products */
+#define	PCI_PRODUCT_AMAZON_COM	0x8250		/* 16550 UART */
 #define	PCI_PRODUCT_AMAZON_ENA_PF	0x0ec2		/* ENA PF */
 #define	PCI_PRODUCT_AMAZON_ENA_PF_RSERV0	0x1ec2		/* ENA PF */
 #define	PCI_PRODUCT_AMAZON_ENA_VF	0xec20		/* ENA VF */

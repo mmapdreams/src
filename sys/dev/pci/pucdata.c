@@ -47,6 +47,17 @@
 
 const struct puc_device_description puc_devs[] = {
 
+	{	/*
+		 * Amazon EC2 arm64 console.  A single 16550 in BAR0; on
+		 * amd64 the same console is reached through the legacy ISA
+		 * ports instead, which arm64 has no equivalent for.
+		 */
+	    {	PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_COM,	0x0000, 0x0000 },
+	    {	0xffff, 0xffff,					0x0000, 0x0000 },
+	    {
+		{ PUC_PORT_COM, 0x10, 0x0000 },
+	    },
+	},
 	{	/* 6 Series KT */
 	    {	PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_6SERIES_KT, 0x0000, 0x0000 },
 	    {	0xffff, 0xffff,					0x0000, 0x0000 },

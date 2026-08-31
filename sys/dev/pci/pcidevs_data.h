@@ -1036,6 +1036,10 @@ static const struct pci_known_product pci_known_products[] = {
 	    "AC1003",
 	},
 	{
+	    PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_COM,
+	    "16550 UART",
+	},
+	{
 	    PCI_VENDOR_AMAZON, PCI_PRODUCT_AMAZON_ENA_PF,
 	    "ENA PF",
 	},
