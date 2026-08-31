@@ -697,6 +697,7 @@ product ALTIMA AC9100		0x03ea	AC9100
 product ALTIMA AC1003		0x03eb	AC1003
 
 /* Amazon products */
+product AMAZON COM		0x8250	16550 UART
 product AMAZON ENA_PF		0x0ec2	ENA PF
 product AMAZON ENA_PF_RSERV0	0x1ec2	ENA PF
 product AMAZON ENA_VF		0xec20	ENA VF
