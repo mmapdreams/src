@@ -124,7 +124,6 @@ int	ena_detach(struct device *, int);
 /* setup */
 int	ena_map_pci(struct ena_softc *, struct pci_attach_args *);
 void	ena_config_host_info(struct ena_softc *);
-int	ena_mem_bar_usable(struct ena_softc *);
 void	ena_config_llq(struct ena_softc *,
 	    struct ena_com_dev_get_features_ctx *);
 unsigned int ena_tx_push_len(struct ena_queue *, struct mbuf *);
@@ -598,31 +597,6 @@ ena_map_pci(struct ena_softc *sc, struct pci_attach_args *pa)
 }
 
 /*
- * Is the LLQ descriptor window real?  A device that decodes nothing behind
- * BAR2 returns all-ones and discards stores, which is indistinguishable from
- * a working window until traffic silently disappears.  Write a value, read it
- * back, and restore what was there.
- */
-int
-ena_mem_bar_usable(struct ena_softc *sc)
-{
-	const uint32_t pat = 0x5a5aa5a5;
-	uint32_t saved, seen;
-
-	if (sc->sc_mem_ios < sizeof(pat))
-		return (0);
-
-	saved = bus_space_read_4(sc->sc_bus.mem_bar_t, sc->sc_bus.mem_bar_h, 0);
-	bus_space_write_4(sc->sc_bus.mem_bar_t, sc->sc_bus.mem_bar_h, 0, pat);
-	membar_sync();
-	seen = bus_space_read_4(sc->sc_bus.mem_bar_t, sc->sc_bus.mem_bar_h, 0);
-	bus_space_write_4(sc->sc_bus.mem_bar_t, sc->sc_bus.mem_bar_h, 0, saved);
-	membar_sync();
-
-	return (seen == pat);
-}
-
-/*
  * Select a TX placement policy.  Devices from the m8i generation on refuse
  * CREATE_SQ for host-memory placement (admin status 6) and accept only the
  * Low Latency Queue, where the descriptor list and packet header live in
@@ -647,21 +621,6 @@ ena_config_llq(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 	ena_dev->mem_bar = bus_space_vaddr(sc->sc_bus.mem_bar_t,
 	    sc->sc_bus.mem_bar_h);
 	if (ena_dev->mem_bar == NULL) {
-		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
-		return;
-	}
-
-	/*
-	 * Some devices advertise an LLQ they cannot actually back: the m8i
-	 * generation exposes BAR2, and the bridges above it route the window,
-	 * but the device decodes nothing there -- every read returns all-ones
-	 * and a write is dropped, while BAR0 on the same device reads
-	 * correctly.  Descriptors written into that window are lost and the
-	 * interface transmits nothing, so probe the window before trusting it
-	 * and stay on host placement when it does not hold a value.
-	 */
-	if (!ena_mem_bar_usable(sc)) {
-		ena_dev->mem_bar = NULL;
 		ena_dev->tx_mem_queue_type = ENA_ADMIN_PLACEMENT_POLICY_HOST;
 		return;
 	}
