@@ -33,6 +33,8 @@
 #include <sys/ioctl.h>
 #include <sys/tty.h>
 #include <sys/conf.h>
+
+#include <dev/cons.h>
 #include <sys/uio.h>
 #include <sys/kernel.h>
 #include <sys/syslog.h>
@@ -106,6 +108,19 @@ com_puc_attach(struct device *parent, struct device *self, void *aux)
 
 	if (pa->type == PUC_PORT_COM_XR17V35X)
 		sc->sc_uarttype = COM_UART_XR17V35X;
+
+	/*
+	 * Claim the console when the machine has no other.  An EC2 arm64
+	 * instance reaches its console only through PCI, and cn_tab is set
+	 * either by a driver that found one or -- on this hardware -- by
+	 * pluart(4) from the SPCR table for a device that never attaches,
+	 * leaving cn_dev NODEV and init(8) with no /dev/console to open.
+	 */
+	if ((cn_tab == NULL || cn_tab->cn_dev == NODEV) &&
+	    comconsattached == 0 && sc->sc_dev.dv_unit == 0 &&
+	    comcnattach(sc->sc_iot, sc->sc_iobase, B115200,
+	    sc->sc_frequency, TTYDEF_CFLAG) == 0)
+		printf(", console");
 
 	com_attach_subr(sc);
 }
