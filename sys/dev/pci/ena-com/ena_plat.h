@@ -327,15 +327,24 @@ ena_reg_read32(struct ena_bus *bus, bus_size_t offset)
 }
 
 /* Copy a TX header into LLQ device memory 64 bits at a time. */
+/*
+ * Copy a completed bounce buffer into the LLQ descriptor window.
+ *
+ * This goes through bus_space(9) rather than storing through the mapping's
+ * virtual address: on some devices a plain pointer write to that window is
+ * discarded -- the bytes read back as zero and nothing is transmitted -- while
+ * the same store issued as an MMIO write lands.  The window is mapped LINEAR,
+ * so dst is bus_space_vaddr() plus an offset, which is recovered here.
+ */
 #define ENA_MEMCPY_TO_DEVICE_64(bus, dst, src, size)			\
 	do {								\
-		int count, i;						\
-		volatile uint64_t *to = (volatile uint64_t *)(dst);	\
-		const uint64_t *from = (const uint64_t *)(src);		\
-		(void)(bus);						\
-		count = (size) / 8;					\
-		for (i = 0; i < count; i++, from++, to++)		\
-			*to = *from;					\
+		struct ena_bus *_b = (bus);				\
+		bus_size_t _o = (bus_size_t)((vaddr_t)(dst) -		\
+		    (vaddr_t)bus_space_vaddr(_b->mem_bar_t,		\
+		    _b->mem_bar_h));					\
+									\
+		bus_space_write_region_8(_b->mem_bar_t, _b->mem_bar_h,	\
+		    _o, (const uint64_t *)(src), (size) / 8);		\
 	} while (0)
 
 #define memcpy_toio memcpy
