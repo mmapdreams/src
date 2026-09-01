@@ -162,7 +162,7 @@ void	ena_rx_fill(struct ena_queue *);
 void	ena_rx_refill(void *);
 int	ena_rxeof(struct ena_queue *);
 int	ena_txeof(struct ena_queue *);
-int	ena_encap(struct ena_queue *, struct mbuf **);
+int	ena_encap(struct ena_queue *, struct mbuf *);
 void	ena_tx_csum(struct ena_com_tx_ctx *, struct mbuf *);
 int	ena_intr_queue(void *);
 int	ena_intr_admin(void *);
@@ -1373,6 +1373,10 @@ ena_create_io_queues(struct ena_softc *sc)
 		eq->eq_tx_push_max = ena_dev->tx_mem_queue_type ==
 		    ENA_ADMIN_PLACEMENT_POLICY_DEV ?
 		    eq->eq_tx_sq->tx_max_header_size : 0;
+		if (eq->eq_tx_push_max > 0 && eq->eq_tx_push_buf == NULL) {
+			eq->eq_tx_push_buf = malloc(eq->eq_tx_push_max,
+			    M_DEVBUF, M_WAITOK | M_ZERO);
+		}
 
 		/* RX queue. */
 		memset(&ctx, 0, sizeof(ctx));
@@ -1794,48 +1798,28 @@ ena_tx_csum(struct ena_com_tx_ctx *tx_ctx, struct mbuf *m)
 }
 
 /*
- * How many leading bytes LLQ pushes into device memory.  The device parses
- * what it is handed, so the push has to end on a protocol boundary rather
- * than at an arbitrary offset: it covers the L2, L3 and L4 headers when they
- * parse, and the Ethernet header alone when they do not.  The result is
- * clamped to what the negotiated LLQ entry has room for.
+ * How many leading bytes LLQ pushes into device memory.  The device is told a
+ * fixed header length -- everything up to what the negotiated entry has room
+ * for -- rather than a protocol boundary: the reference driver sends
+ * min(pkthdr.len, tx_max_header_size) and the device parses the headers out of
+ * that itself.  Handing it a shorter, protocol-aligned push makes it drop the
+ * packet silently.
  */
 unsigned int
 ena_tx_push_len(struct ena_queue *eq, struct mbuf *m)
 {
-	struct ether_extracted ext;
-	unsigned int len;
-
 	if (eq->eq_tx_push_max == 0)
 		return (0);
 
-	ether_extract_headers(m, &ext);
-
-	len = ext.evh != NULL ? ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN :
-	    ETHER_HDR_LEN;
-	if (ext.ip4 != NULL || ext.ip6 != NULL) {
-		len += ext.iphlen;
-		if (ext.tcp != NULL)
-			len += ext.tcphlen;
-		else if (ext.udp != NULL)
-			len += sizeof(*ext.udp);
-	}
-
-	if (len > eq->eq_tx_push_max)
-		len = eq->eq_tx_push_max;
-	if (len > m->m_pkthdr.len)
-		len = m->m_pkthdr.len;
-
-	return (len);
+	return (MIN(eq->eq_tx_push_max, m->m_pkthdr.len));
 }
 
 int
-ena_encap(struct ena_queue *eq, struct mbuf **mp)
+ena_encap(struct ena_queue *eq, struct mbuf *m)
 {
 	struct ena_softc *sc = eq->eq_sc;
 	struct ena_com_tx_ctx tx_ctx;
 	struct ena_tx_buf *tb;
-	struct mbuf *m = *mp;
 	bus_dmamap_t map;
 	uint16_t req_id;
 	int nb_hw_desc, rc, i, push, push_len;
@@ -1845,61 +1829,65 @@ ena_encap(struct ena_queue *eq, struct mbuf **mp)
 	map = tb->etx_map;
 
 	/*
-	 * The pushed bytes must be contiguous in the mbuf and must not also be
-	 * described by a buffer descriptor, so pull them up and skip them when
-	 * the segment list is built.  A short packet can be pushed whole,
-	 * leaving no descriptor at all: ena_com_prepare_tx() reads that as a
-	 * packet as long as the push is non-empty.
+	 * Copy the pushed bytes into a per-queue buffer rather than pulling them
+	 * up in the mbuf: the push is a fixed length that can exceed the whole
+	 * packet, which m_pullup(9) cannot satisfy.
 	 *
-	 * m_pullup() can return a different mbuf, or free the chain and return
-	 * NULL, so the caller's pointer is updated either way -- it still owns
-	 * the mbuf on failure.
+	 * A packet that fits entirely inside the push needs no DMA at all --
+	 * the device already has every byte -- so it is not mapped, and
+	 * ena_com_prepare_tx() takes it as a packet on the strength of the push
+	 * alone.  Anything longer is mapped and the first eq_tx_push_max bytes
+	 * are skipped when the descriptor list is built, so the device is not
+	 * told to fetch them a second time.
 	 */
 	push = push_len = ena_tx_push_len(eq, m);
-	if (push > 0 && m->m_len < push) {
-		m = *mp = m_pullup(m, push);
-		if (m == NULL)
-			return (ENOBUFS);
-	}
-
-	rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
-	    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
-	if (rc == EFBIG) {
-		if (m_defrag(m, M_DONTWAIT) != 0)
-			return (ENOBUFS);
-		rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
-		    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
-	}
-	if (rc != 0)
-		return (ENOBUFS);
-
-	bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-	    BUS_DMASYNC_PREWRITE);
+	if (push_len > 0)
+		m_copydata(m, 0, push_len, eq->eq_tx_push_buf);
 
 	memset(&tx_ctx, 0, sizeof(tx_ctx));
 	tx_ctx.ena_bufs = tb->etx_bufs;
 	tx_ctx.req_id = req_id;
-
 	tx_ctx.num_bufs = 0;
-	for (i = 0; i < map->dm_nsegs; i++) {
-		bus_addr_t addr = map->dm_segs[i].ds_addr;
-		bus_size_t len = map->dm_segs[i].ds_len;
+	map->dm_nsegs = 0;
 
-		if (push > 0) {
-			if (len <= push) {
-				push -= len;
-				continue;
-			}
-			addr += push;
-			len -= push;
-			push = 0;
+	if (push_len > 0 && m->m_pkthdr.len <= push_len) {
+		/* Wholly pushed: nothing left to describe. */
+	} else {
+		rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
+		    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
+		if (rc == EFBIG) {
+			if (m_defrag(m, M_DONTWAIT) != 0)
+				return (ENOBUFS);
+			rc = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
+			    BUS_DMA_NOWAIT | BUS_DMA_STREAMING);
 		}
-		tb->etx_bufs[tx_ctx.num_bufs].paddr = addr;
-		tb->etx_bufs[tx_ctx.num_bufs].len = len;
-		tx_ctx.num_bufs++;
+		if (rc != 0)
+			return (ENOBUFS);
+
+		bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
+		    BUS_DMASYNC_PREWRITE);
+
+		for (i = 0; i < map->dm_nsegs; i++) {
+			bus_addr_t addr = map->dm_segs[i].ds_addr;
+			bus_size_t len = map->dm_segs[i].ds_len;
+
+			if (push > 0) {
+				if (len <= push) {
+					push -= len;
+					continue;
+				}
+				addr += push;
+				len -= push;
+				push = 0;
+			}
+			tb->etx_bufs[tx_ctx.num_bufs].paddr = addr;
+			tb->etx_bufs[tx_ctx.num_bufs].len = len;
+			tx_ctx.num_bufs++;
+		}
 	}
+
 	if (push_len > 0) {
-		tx_ctx.push_header = mtod(m, void *);
+		tx_ctx.push_header = eq->eq_tx_push_buf;
 		tx_ctx.header_len = push_len;
 	}
 
@@ -1907,9 +1895,11 @@ ena_encap(struct ena_queue *eq, struct mbuf **mp)
 
 	if (!ena_com_sq_have_enough_space(eq->eq_tx_sq,
 	    tx_ctx.num_bufs + 1)) {
-		bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-		    BUS_DMASYNC_POSTWRITE);
-		bus_dmamap_unload(sc->sc_dmat, map);
+		if (map->dm_nsegs > 0) {
+			bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
+			    BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, map);
+		}
 		return (ENOBUFS);
 	}
 
@@ -1925,9 +1915,11 @@ ena_encap(struct ena_queue *eq, struct mbuf **mp)
 
 	rc = ena_com_prepare_tx(eq->eq_tx_sq, &tx_ctx, &nb_hw_desc);
 	if (rc != 0) {
-		bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-		    BUS_DMASYNC_POSTWRITE);
-		bus_dmamap_unload(sc->sc_dmat, map);
+		if (map->dm_nsegs > 0) {
+			bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
+			    BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, map);
+		}
 		return (ENOBUFS);
 	}
 
@@ -1967,12 +1959,7 @@ ena_start(struct ifqueue *ifq)
 		if (m == NULL)
 			break;
 
-		/*
-		 * ena_encap() can replace the mbuf when it pulls the pushed
-		 * header up, so the stats and the bpf tap below read the
-		 * pointer it leaves behind rather than the dequeued one.
-		 */
-		if (ena_encap(eq, &m) != 0) {
+		if (ena_encap(eq, m) != 0) {
 			m_freem(m);
 			ifq->ifq_errors++;
 			eq->eq_kst_tx_errors++;
@@ -2017,9 +2004,11 @@ ena_txeof(struct ena_queue *eq)
 
 		tb = &eq->eq_tx_buf[req_id];
 
-		bus_dmamap_sync(sc->sc_dmat, tb->etx_map, 0,
-		    tb->etx_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
-		bus_dmamap_unload(sc->sc_dmat, tb->etx_map);
+		if (tb->etx_map->dm_nsegs > 0) {
+			bus_dmamap_sync(sc->sc_dmat, tb->etx_map, 0,
+			    tb->etx_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, tb->etx_map);
+		}
 		m_freem(tb->etx_mbuf);
 		tb->etx_mbuf = NULL;
 
