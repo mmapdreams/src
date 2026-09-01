@@ -148,6 +148,7 @@ struct ena_queue {
 	uint16_t		*eq_tx_free_ids;
 	unsigned int		 eq_tx_ring_size;
 	unsigned int		 eq_tx_push_max;	/* 0 unless LLQ */
+	uint8_t			*eq_tx_push_buf;	/* eq_tx_push_max bytes, LLQ */
 	unsigned int		 eq_tx_prod;	/* next req_id to use */
 	unsigned int		 eq_tx_cons;	/* next completion to reap */
 
