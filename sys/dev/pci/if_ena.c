@@ -1282,6 +1282,7 @@ ena_init(struct ena_softc *sc)
 		struct ena_eth_io_intr_reg intr_reg;
 
 		ena_com_update_intr_reg(&intr_reg, 0, 0, true, false);
+		ena_com_unmask_intr(eq->eq_tx_cq, &intr_reg);
 		ena_com_unmask_intr(eq->eq_rx_cq, &intr_reg);
 	}
 
@@ -2048,9 +2049,15 @@ ena_intr_queue(void *arg)
 	work |= ena_rxeof(eq);
 	work |= ena_txeof(eq);
 
-	/* Rearm the vector. */
+	/*
+	 * Rearm the vector on the TX completion queue: each queue has its own
+	 * unmask register, and the TX one is what the reference driver writes
+	 * from its cleanup pass.  Left masked, the device writes no TX
+	 * completion at all -- ena_com_tx_comp_req_id_get() then reports
+	 * ENA_COM_TRY_AGAIN forever and nothing is transmitted.
+	 */
 	ena_com_update_intr_reg(&intr_reg, 64, 64, true, false);
-	ena_com_unmask_intr(eq->eq_rx_cq, &intr_reg);
+	ena_com_unmask_intr(eq->eq_tx_cq, &intr_reg);
 
 	return (work != 0);
 }
