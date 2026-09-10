@@ -1,4 +1,4 @@
-/* $OpenBSD: cgi.c,v 1.121 2026/08/27 13:17:42 schwarze Exp $ */
+/* $OpenBSD: cgi.c,v 1.124 2026/09/01 13:56:12 schwarze Exp $ */
 /*
  * Copyright (c) 2014-2019, 2021, 2022, 2026 Ingo Schwarze <schwarze@usta.de>
  * Copyright (c) 2011, 2012 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -75,22 +75,22 @@ static	void		 parse_path_info(struct req *, const char *);
 static	void		 parse_query_string(struct req *, const char *);
 static	void		 pg_error_badrequest(const char *);
 static	void		 pg_error_internal(void);
-static	void		 pg_index(const struct req *);
+static	int		 pg_index(const struct req *);
 static	void		 pg_noresult(const struct req *, int, const char *,
 				const char *);
 static	void		 pg_redirect(const struct req *, const char *);
-static	void		 pg_search(const struct req *);
-static	void		 pg_searchres(const struct req *,
+static	int		 pg_search(const struct req *);
+static	int		 pg_searchres(const struct req *,
 				struct manpage *, size_t);
-static	void		 pg_show(struct req *, const char *);
+static	int		 pg_show(struct req *, const char *);
 static	int		 resp_begin_html(int, const char *, const char *);
 static	void		 resp_begin_http(int, const char *);
-static	void		 resp_catman(const struct req *, const char *);
+static	int		 resp_catman(const struct req *, const char *, int);
 static	int		 resp_copy(const char *, int *);
 static	void		 resp_end_html(void);
-static	void		 resp_format(const struct req *, const char *);
+static	int		 resp_format(const struct req *, const char *, int);
 static	void		 resp_searchform(const struct req *, enum focus);
-static	void		 resp_show(const struct req *, const char *);
+static	int		 resp_show(const struct req *, const char *, int);
 static	void		 set_query_attr(char **, char **);
 static	int		 validate_arch(const char *);
 static	int		 validate_filename(const char *);
@@ -557,9 +557,15 @@ validate_filename(const char *file)
 	    (strncmp(file, "man", 3) && strncmp(file, "cat", 3)));
 }
 
-static void
+static int
 pg_index(const struct req *req)
 {
+	if (pledge("stdio", NULL) == -1) {
+		warn("pledge");
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
+
 	if (resp_begin_html(200, NULL, NULL) == 0)
 		puts("<header>");
 	resp_searchform(req, FOCUS_QUERY);
@@ -578,6 +584,7 @@ pg_index(const struct req *req)
 	       scriptname, *scriptname == '\0' ? "" : "/",
 	       scriptname, *scriptname == '\0' ? "" : "/");
 	resp_end_html();
+	return EXIT_SUCCESS;
 }
 
 static void
@@ -640,15 +647,14 @@ pg_redirect(const struct req *req, const char *name)
 	printf("\r\nContent-Type: text/html; charset=utf-8\r\n\r\n");
 }
 
-static void
+static int
 pg_searchres(const struct req *req, struct manpage *r, size_t sz)
 {
 	char		*arch, *archend;
-	const char	*sec;
+	const char	*file, *sec;
 	size_t		 i, iuse;
 	int		 archprio, archpriouse;
 	int		 prio, priouse;
-	int		 have_header;
 
 	for (i = 0; i < sz; i++) {
 		if (validate_filename(r[i].file))
@@ -656,7 +662,7 @@ pg_searchres(const struct req *req, struct manpage *r, size_t sz)
 		warnx("invalid filename %s in %s database",
 		    r[i].file, req->q.manpath);
 		pg_error_internal();
-		return;
+		return EXIT_FAILURE;
 	}
 
 	if (req->isquery && sz == 1) {
@@ -673,7 +679,7 @@ pg_searchres(const struct req *req, struct manpage *r, size_t sz)
 		printf("%s\r\n"
 		    "Content-Type: text/html; charset=utf-8\r\n\r\n",
 		    r[0].file);
-		return;
+		return EXIT_SUCCESS;
 	}
 
 	/*
@@ -682,6 +688,7 @@ pg_searchres(const struct req *req, struct manpage *r, size_t sz)
 	 */
 
 	iuse = 0;
+	file = NULL;
 	if (req->q.equal || sz == 1) {
 		priouse = 20;
 		archpriouse = 3;
@@ -715,19 +722,25 @@ pg_searchres(const struct req *req, struct manpage *r, size_t sz)
 			priouse = prio;
 			iuse = i;
 		}
-		have_header = resp_begin_html(200, NULL, r[iuse].file);
-	} else
-		have_header = resp_begin_html(200, NULL, NULL);
+		file = r[iuse].file;
+	}
 
-	if (have_header == 0)
-		puts("<header>");
-	resp_searchform(req,
-	    req->q.equal || sz == 1 ? FOCUS_NONE : FOCUS_QUERY);
-	puts("</header>");
+	if (file == NULL) {
+		if (pledge("stdio", NULL) == -1) {
+			warn("pledge");
+			pg_error_internal();
+			return EXIT_FAILURE;
+		}
+	}
 
 	if (sz > 1) {
-		puts("<nav>");
-		puts("<table class=\"results\">");
+		if (resp_begin_html(200, NULL, file) == 0)
+			puts("<header>");
+		resp_searchform(req,
+		    req->q.equal || sz == 1 ? FOCUS_NONE : FOCUS_QUERY);
+		puts("</header>\n"
+		     "<nav>\n"
+		     "<table class=\"results\">");
 		for (i = 0; i < sz; i++) {
 			printf("  <tr>\n"
 			       "    <td>"
@@ -746,18 +759,18 @@ pg_searchres(const struct req *req, struct manpage *r, size_t sz)
 		}
 		puts("</table>");
 		puts("</nav>");
-	}
+		if (req->q.equal) {
+			puts("<hr>");
+			return resp_show(req, file, 1);
+		}
+	} else if (req->q.equal) 
+		return resp_show(req, file, 0);
 
-	if (req->q.equal || sz == 1) {
-		puts("<hr>");
-		resp_show(req, r[iuse].file);
-	}
-
-	resp_end_html();
+	return EXIT_SUCCESS;
 }
 
-static void
-resp_catman(const struct req *req, const char *file)
+static int
+resp_catman(const struct req *req, const char *file, int html_begun)
 {
 	FILE		*f;
 	char		*p;
@@ -767,12 +780,33 @@ resp_catman(const struct req *req, const char *file)
 	int		 italic, bold;
 
 	if ((f = fopen(file, "r")) == NULL) {
-		puts("<p role=\"doc-notice\">\n"
-		     "  You specified an invalid manual file.\n"
-		     "</p>");
-		return;
+		if (html_begun) {
+			puts("<p role=\"doc-notice\">"
+			     "Internal Server Error</p>");
+			resp_end_html();
+		} else
+			pg_error_badrequest(
+			    "You specified an invalid manual file.");
+		return EXIT_FAILURE;
 	}
 
+	if (pledge("stdio", NULL) == -1) {
+		warn("pledge");
+		if (html_begun) {
+			puts("<p role=\"doc-notice\">"
+			     "Internal Server Error</p>");
+			resp_end_html();
+		} else
+			pg_error_internal();
+		return EXIT_FAILURE;
+	}
+
+	if (html_begun == 0) {
+		if (resp_begin_html(200, NULL, file) == 0)
+			puts("<header>");
+		resp_searchform(req, FOCUS_NONE);
+		puts("</header>");
+	}
 	puts("<div class=\"catman\">\n"
 	     "<pre>");
 
@@ -891,12 +925,14 @@ resp_catman(const struct req *req, const char *file)
 
 	puts("</pre>\n"
 	     "</div>");
+	resp_end_html();
 
 	fclose(f);
+	return EXIT_SUCCESS;
 }
 
-static void
-resp_format(const struct req *req, const char *file)
+static int
+resp_format(const struct req *req, const char *file, int html_begun)
 {
 	struct manoutput conf;
 	struct mparse	*mp;
@@ -905,11 +941,15 @@ resp_format(const struct req *req, const char *file)
 	int		 fd;
 	int		 usepath;
 
-	if (-1 == (fd = open(file, O_RDONLY))) {
-		puts("<p role=\"doc-notice\">\n"
-		     "  You specified an invalid manual file.\n"
-		     "</p>");
-		return;
+	if ((fd = open(file, O_RDONLY)) == -1) {
+		if (html_begun) {
+			puts("<p role=\"doc-notice\">"
+			     "Internal Server Error</p>");
+			resp_end_html();
+		} else
+			pg_error_badrequest(
+			    "You specified an invalid manual file.");
+		return EXIT_FAILURE;
 	}
 
 	mchars_alloc();
@@ -917,7 +957,17 @@ resp_format(const struct req *req, const char *file)
 	    MPARSE_VALIDATE, MANDOC_OS_OTHER, req->q.manpath);
 	mparse_readfd(mp, fd, file);
 	close(fd);
-	meta = mparse_result(mp);
+
+	if (pledge("stdio", NULL) == -1) {
+		warn("pledge");
+		if (html_begun) {
+			puts("<p role=\"doc-notice\">"
+			     "Internal Server Error</p>");
+			resp_end_html();
+		} else
+			pg_error_internal();
+		return EXIT_FAILURE;
+	}
 
 	memset(&conf, 0, sizeof(conf));
 	conf.fragment = 1;
@@ -927,33 +977,43 @@ resp_format(const struct req *req, const char *file)
 	    scriptname, *scriptname == '\0' ? "" : "/",
 	    usepath ? req->q.manpath : "", usepath ? "/" : "");
 
+	if (html_begun == 0) {
+	 	if (resp_begin_html(200, NULL, file) == 0)
+			puts("<header>");
+		resp_searchform(req, FOCUS_NONE);
+		puts("</header>");
+	}
+
 	vp = html_alloc(&conf);
+	meta = mparse_result(mp);
 	if (meta->macroset == MACROSET_MDOC)
 		html_mdoc(vp, meta);
 	else
 		html_man(vp, meta);
+	resp_end_html();
 
 	html_free(vp);
 	mparse_free(mp);
 	mchars_free();
 	free(conf.man);
 	free(conf.style);
+	return EXIT_SUCCESS;
 }
 
-static void
-resp_show(const struct req *req, const char *file)
+static int
+resp_show(const struct req *req, const char *file, int html_begun)
 {
 
 	if ('.' == file[0] && '/' == file[1])
 		file += 2;
 
 	if ('c' == *file)
-		resp_catman(req, file);
+		return resp_catman(req, file, html_begun);
 	else
-		resp_format(req, file);
+		return resp_format(req, file, html_begun);
 }
 
-static void
+static int
 pg_show(struct req *req, const char *fullpath)
 {
 	char		*manpath;
@@ -962,7 +1022,7 @@ pg_show(struct req *req, const char *fullpath)
 	if ((file = strchr(fullpath, '/')) == NULL) {
 		pg_error_badrequest(
 		    "You did not specify a page to show.");
-		return;
+		return EXIT_FAILURE;
 	}
 	manpath = mandoc_strndup(fullpath, file - fullpath);
 	file++;
@@ -971,7 +1031,23 @@ pg_show(struct req *req, const char *fullpath)
 		pg_error_badrequest(
 		    "You specified an invalid manpath.");
 		free(manpath);
-		return;
+		return EXIT_FAILURE;
+	}
+
+	if (unveil(MAN_DIR, "") == -1) {
+		warn("unveil %s", MAN_DIR);
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
+	if (unveil(manpath, "r") == -1) {
+		warn("unveil %s", manpath);
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
+	if (unveil(NULL, NULL) == -1) {
+		warn("unveil NULL");
+		pg_error_internal();
+		return EXIT_FAILURE;
 	}
 
 	/*
@@ -984,25 +1060,19 @@ pg_show(struct req *req, const char *fullpath)
 		warn("chdir %s", manpath);
 		pg_error_internal();
 		free(manpath);
-		return;
+		return EXIT_FAILURE;
 	}
 	free(manpath);
 
 	if ( ! validate_filename(file)) {
 		pg_error_badrequest(
 		    "You specified an invalid manual file.");
-		return;
+		return EXIT_FAILURE;
 	}
-
-	if (resp_begin_html(200, NULL, file) == 0)
-		puts("<header>");
-	resp_searchform(req, FOCUS_NONE);
-	puts("</header>");
-	resp_show(req, file);
-	resp_end_html();
+	return resp_show(req, file, 0);
 }
 
-static void
+static int
 pg_search(const struct req *req)
 {
 	struct mansearch	  search;
@@ -1011,7 +1081,23 @@ pg_search(const struct req *req)
 	char			**argv;
 	char			 *query, *rp, *wp;
 	size_t			  ressz;
-	int			  argc;
+	int			  argc, irc;
+
+	if (unveil(MAN_DIR, "") == -1) {
+		warn("unveil %s", MAN_DIR);
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
+	if (unveil(req->q.manpath, "r") == -1) {
+		warn("unveil %s", req->q.manpath);
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
+	if (unveil(NULL, NULL) == -1) {
+		warn("unveil NULL");
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
 
 	/*
 	 * Begin by chdir()ing into the root of the manpath.
@@ -1022,7 +1108,7 @@ pg_search(const struct req *req)
 	if (chdir(req->q.manpath) == -1) {
 		warn("chdir %s", req->q.manpath);
 		pg_error_internal();
-		return;
+		return EXIT_FAILURE;
 	}
 
 	search.arch = req->q.arch;
@@ -1068,6 +1154,7 @@ pg_search(const struct req *req)
 
 	res = NULL;
 	ressz = 0;
+	irc = EXIT_SUCCESS;
 	if (req->isquery && req->q.equal && argc == 1)
 		pg_redirect(req, argv[0]);
 	else if (mansearch(&search, &paths, argc, argv, &res, &ressz) == 0)
@@ -1076,12 +1163,13 @@ pg_search(const struct req *req)
 	else if (ressz == 0)
 		pg_noresult(req, 404, "Not Found", "No results found.");
 	else
-		pg_searchres(req, res, ressz);
+		irc = pg_searchres(req, res, ressz);
 
 	free(query);
 	mansearch_free(res, ressz);
 	free(paths.paths[0]);
 	free(paths.paths);
+	return irc;
 }
 
 int
@@ -1091,10 +1179,21 @@ main(void)
 	struct itimerval itimer;
 	const char	*path;
 	const char	*querystring;
-	int		 i;
+	int		 i, irc;
 
-	if (pledge("stdio rpath", NULL) == -1) {
+	/*
+	 * Baseline protections;
+	 * unveil(2) will be narrowed when the manpath is selected,
+	 * pledge(2) will be narrowed when the manual file is opened.
+	 */
+
+	if (pledge("stdio rpath unveil", NULL) == -1) {
 		warn("pledge");
+		pg_error_internal();
+		return EXIT_FAILURE;
+	}
+	if (unveil(MAN_DIR, "r") == -1) {
+		warn("unveil %s", MAN_DIR);
 		pg_error_internal();
 		return EXIT_FAILURE;
 	}
@@ -1166,11 +1265,11 @@ main(void)
 	/* Dispatch to the three different pages. */
 
 	if ('\0' != *path)
-		pg_show(&req, path);
+		irc = pg_show(&req, path);
 	else if (NULL != req.q.query)
-		pg_search(&req);
+		irc = pg_search(&req);
 	else
-		pg_index(&req);
+		irc = pg_index(&req);
 
 	free(req.q.manpath);
 	free(req.q.arch);
@@ -1179,7 +1278,7 @@ main(void)
 	for (i = 0; i < (int)req.psz; i++)
 		free(req.p[i]);
 	free(req.p);
-	return EXIT_SUCCESS;
+	return irc;
 }
 
 /*

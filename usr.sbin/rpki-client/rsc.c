@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsc.c,v 1.47 2026/07/09 12:13:56 tb Exp $ */
+/*	$OpenBSD: rsc.c,v 1.49 2026/09/03 17:19:30 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2022 Job Snijders <job@fastly.com>
@@ -366,6 +366,12 @@ rsc_validate(const char *fn, void *obj, struct cert *cert)
 	return 1; /* XXX */
 }
 
+static const ASN1_OBJECT *
+rsc_obj_oid(void)
+{
+	return rsc_oid;
+}
+
 static void *
 rsc_obj_new(size_t der_len, time_t signtime)
 {
@@ -386,60 +392,20 @@ rsc_obj_free(void *obj)
 
 static const struct signed_obj rsc_signed_obj = {
 	.rtype = RTYPE_RSC,
+
 	.new = rsc_obj_new,
 	.free = rsc_obj_free,
 	.cert_info = rsc_cert_info,
 	.parse_econtent = rsc_parse_econtent,
 	.validate = rsc_validate,
+
+	.oid = rsc_obj_oid,
 };
 
 const struct signed_obj *
 rsc_obj(void)
 {
 	return &rsc_signed_obj;
-}
-
-/*
- * Parse a full RFC 9323 file.
- * Returns the RSC or NULL if the object was malformed.
- */
-struct rsc *
-rsc_parse(struct cert **out_cert, const char *fn, int talid,
-    const unsigned char *der, size_t len)
-{
-	struct rsc		*rsc;
-	struct cert		*cert = NULL;
-	unsigned char		*cms;
-	size_t			 cmsz;
-	time_t			 signtime = 0;
-	int			 rc = 0;
-
-	assert(*out_cert == NULL);
-
-	cms = cms_parse_validate(&cert, fn, talid, der, len, rsc_oid, &cmsz,
-	    &signtime);
-	if (cms == NULL)
-		return NULL;
-
-	rsc = rsc_obj_new(len, signtime);
-	if (!rsc_cert_info(fn, rsc, cert))
-		goto out;
-	if (!rsc_parse_econtent(fn, rsc, cms, cmsz))
-		goto out;
-	(void)rsc_validate(fn, rsc, cert);
-
-	*out_cert = cert;
-	cert = NULL;
-
-	rc = 1;
- out:
-	if (rc == 0) {
-		rsc_free(rsc);
-		rsc = NULL;
-	}
-	cert_free(cert);
-	free(cms);
-	return rsc;
 }
 
 /*

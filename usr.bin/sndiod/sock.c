@@ -1,4 +1,4 @@
-/*	$OpenBSD: sock.c,v 1.69 2026/08/12 10:58:19 ratchov Exp $	*/
+/*	$OpenBSD: sock.c,v 1.71 2026/08/30 13:49:19 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -759,6 +759,12 @@ sock_hello(struct sock *f)
 			return 0;
 		break;
 	case AMSG_TYPE_MIDITHRU:
+		/*
+		 * Make legacy "midithru/0" an alias to "midi/default"
+		 */
+		if (strcmp("default-0", name) == 0)
+			strlcpy(name, "default", sizeof(name));
+		/* FALLTHROUGH */
 	case AMSG_TYPE_MIDI:
 		midithru = midithru_byname(name);
 		if (midithru == NULL)
@@ -806,6 +812,10 @@ sock_hello(struct sock *f)
 		f->ctlops = 0;
 		f->ctlsyncpending = 0;
 	} else {
+		if (type != AMSG_TYPE_SND) {
+			logx(2, "sock %d: expected 'snd' type", f->fd);
+			return 0;
+		}
 		f->slot = slot_new(opt, id, p->who, &sock_slotops, f, mode);
 		if (f->slot == NULL)
 			return 0;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf.c,v 1.1238 2026/08/19 07:54:41 sashan Exp $ */
+/*	$OpenBSD: pf.c,v 1.1240 2026/09/04 08:29:31 sashan Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -5557,7 +5557,7 @@ pf_tcp_track_full(struct pf_pdesc *pd, struct pf_state **stp, u_short *reason,
 	struct tcphdr		*th = &pd->hdr.tcp;
 	struct pf_state_peer	*src, *dst;
 	u_int16_t		 win = ntohs(th->th_win);
-	u_int32_t		 ack, end, data_end, seq, orig_seq;
+	u_int32_t		 ack, orig_ack, end, data_end, seq, orig_seq;
 	u_int8_t		 sws, dws, psrc, pdst;
 	int			 ackskew;
 
@@ -5667,6 +5667,7 @@ pf_tcp_track_full(struct pf_pdesc *pd, struct pf_state **stp, u_short *reason,
 		if (th->th_flags & TH_FIN)
 			end++;
 	}
+	orig_ack = ack;
 
 	if ((th->th_flags & TH_ACK) == 0) {
 		/* Let it pass through the ack skew check */
@@ -5722,7 +5723,7 @@ pf_tcp_track_full(struct pf_pdesc *pd, struct pf_state **stp, u_short *reason,
 	    (orig_seq == src->seqlo + 1) || (orig_seq + 1 == src->seqlo) ||
 	    /* Require an exact/+1 sequence match on resets when possible */
 	    (SEQ_GEQ(orig_seq, src->seqlo - (dst->max_win << dws)) &&
-	    SEQ_LEQ(orig_seq, src->seqlo + 1) && ackskew == 0 &&
+	    SEQ_LEQ(orig_seq, src->seqlo + 1) && orig_ack == dst->seqlo &&
 	    (th->th_flags & (TH_ACK|TH_RST)) == (TH_ACK|TH_RST)))) {
 	    /* Allow resets to match sequence window if ack is perfect match */
 
@@ -7974,9 +7975,17 @@ pf_walk_header6(struct pf_pdesc *pd, struct ip6_hdr *h, u_short *reason)
 				 * local source address.  If either one is
 				 * missing then MLD message is invalid and
 				 * should be discarded.
+				 * RFC 3590 clarifies that during initial
+				 * duplicate address detection nodes may not
+				 * have an address, so are permitted to use
+				 * the unspecified address, but only for Report
+				 * and Done messages.
 				 */
 				if ((h->ip6_hlim != 1) ||
-				    !IN6_IS_ADDR_LINKLOCAL(&h->ip6_src)) {
+				    (!IN6_IS_ADDR_LINKLOCAL(&h->ip6_src) &&
+				     icmp6.icmp6_type == MLD_LISTENER_QUERY) ||
+				    (!IN6_IS_ADDR_LINKLOCAL(&h->ip6_src) &&
+				    !IN6_IS_ADDR_UNSPECIFIED(&h->ip6_src))) {
 					DPFPRINTF(LOG_NOTICE, "Invalid MLD");
 					REASON_SET(reason, PFRES_IPOPTIONS);
 					return (PF_DROP);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: lldpd.c,v 1.10 2026/08/23 16:07:19 deraadt Exp $ */
+/*	$OpenBSD: lldpd.c,v 1.12 2026/09/04 04:27:00 dlg Exp $ */
 
 /*
  * Copyright (c) 2024 David Gwynne <dlg@openbsd.org>
@@ -268,7 +268,7 @@ main(int argc, char *argv[])
 	if (!debug && rdaemon(devnull) == -1)
 		err(1, "unable to daemonize");
 
-	if (pledge("stdio unix route", NULL) == -1)
+	if (pledge("stdio unix route mcast", NULL) == -1)
 		err(1, "pledge");
 
 	event_init();
@@ -450,8 +450,10 @@ rtsock_if_detach(struct lldpd *lldpd, const struct if_announcemsghdr *ifan)
 	if (setsockopt(EVENT_FD(&lldpd->en_ev),
 	    IFT_ETHER, FRAME_DEL_MEMBERSHIP,
 	    &fmr, sizeof(fmr)) == -1) {
-		lwarn("%s index %u: del membership",
-		    ifp->if_key.if_name, ifp->if_key.if_index);
+		if (errno != ENXIO) {
+			lwarn("%s index %u: del membership",
+			    ifp->if_key.if_name, ifp->if_key.if_index);
+		}
 	}
 
 	/* don't have to leave mcast group */

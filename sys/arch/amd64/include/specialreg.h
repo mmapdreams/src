@@ -1,4 +1,4 @@
-/*	$OpenBSD: specialreg.h,v 1.124 2026/07/30 14:00:48 hshoexer Exp $	*/
+/*	$OpenBSD: specialreg.h,v 1.127 2026/09/08 21:01:59 daniel Exp $	*/
 /*	$NetBSD: specialreg.h,v 1.1 2003/04/26 18:39:48 fvdl Exp $	*/
 /*	$NetBSD: x86/specialreg.h,v 1.2 2003/04/25 21:54:30 fvdl Exp $	*/
 
@@ -281,6 +281,11 @@
     ("\20" "\03AVX512FNNIW" "\04AVX512FMAPS" "\012SRBDS_CTRL" "\013MD_CLEAR" \
      "\016TSXFA" "\025IBT" "\033IBRS,IBPB" "\034STIBP" "\035L1DF" "\040SSBD" )
 
+/* SEFF subleaf 2 EDX bits */
+#define SEFF2EDX_BHI_CTRL	0x00000010 /* BHI_DIS_S supported */
+#define SEFF2_EDX_BITS \
+    ("\20" "\05BHI_CTRL" )
+
 /*
  * Thermal and Power Management (CPUID function 0x6) EAX bits
  */
@@ -474,6 +479,7 @@
 #define SPEC_CTRL_IBRS		(1ULL << 0)
 #define SPEC_CTRL_STIBP		(1ULL << 1)
 #define SPEC_CTRL_SSBD		(1ULL << 2)
+#define SPEC_CTRL_BHI_DIS_S	(1ULL << 10)
 #define MSR_PRED_CMD		0x049	/* Speculation Control IBPB */
 #define PRED_CMD_IBPB		(1ULL << 0)
 #define MSR_BIOS_UPDT_TRIG	0x079
@@ -1409,6 +1415,8 @@
 #define VMCS_GUEST_IA32_SYSENTER_ESP	0x6824
 #define VMCS_GUEST_IA32_SYSENTER_EIP	0x6826
 #define VMCS_GUEST_IA32_S_CET		0x6828
+#define VMCS_GUEST_SSP			0x682A
+#define VMCS_GUEST_IA32_INTR_SSP_TABLE	0x682C
 
 /* Natural-width host state fields */
 #define VMCS_HOST_IA32_CR0		0x6C00
@@ -1424,6 +1432,8 @@
 #define VMCS_HOST_IA32_RSP		0x6C14
 #define VMCS_HOST_IA32_RIP		0x6C16
 #define VMCS_HOST_IA32_S_CET		0x6C18
+#define VMCS_HOST_SSP			0x6C1A
+#define VMCS_HOST_IA32_INTR_SSP_TABLE	0x6C1C
 
 #define IA32_VMX_INVVPID_INDIV_ADDR_CTX	0x0
 #define IA32_VMX_INVVPID_SINGLE_CTX	0x1
@@ -1454,6 +1464,7 @@
 #define MSR_AMD_VM_HSAVE_PA		0xc0010117
 #define CPUID_AMD_SVM_CAP		0x8000000A
 #define AMD_SVM_NESTED_PAGING_CAP	(1 << 0)
+#define AMD_SVM_NRIP_SAVE_CAP		(1 << 3)
 #define AMD_SVM_VMCB_CLEAN_CAP		(1 << 5)
 #define AMD_SVM_FLUSH_BY_ASID_CAP	(1 << 6)
 #define AMD_SVM_DECODE_ASSIST_CAP	(1 << 7)

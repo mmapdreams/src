@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.c,v 1.147 2026/08/04 19:12:14 claudio Exp $	*/
+/*	$OpenBSD: virtio.c,v 1.149 2026/09/08 19:46:18 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -342,7 +342,7 @@ viornd_notifyq(struct virtio_dev *dev, uint16_t idx)
 
 	rnd_data = malloc(sz);
 	if (rnd_data == NULL)
-		fatal("memory allocaiton error for viornd data");
+		fatal("memory allocation error for viornd data");
 
 	arc4random_buf(rnd_data, sz);
 	if (write_mem(desc[dxx].addr, rnd_data, sz)) {
@@ -1109,7 +1109,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			virtio_pci_add_cap(id, VIRTIO_PCI_CAP_NOTIFY_CFG,
 			    bar_id, 0);
 
-			/* Device specific initializiation. */
+			/* Device specific initialization. */
 			dev->dev_type = VMD_DEVTYPE_NET;
 			dev->vmm_id = vm->vm_vmmid;
 			dev->vionet.data_fd = child_taps[i];
@@ -1697,7 +1697,7 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 		t[1] = '\0';
 
 		i = 0;
-		nargv[i++] = env->argv0;
+		nargv[i++] = env->vmd_execpath;
 		nargv[i++] = "-X";
 		nargv[i++] = num;
 		nargv[i++] = "-t";
@@ -1717,7 +1717,7 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 			fatalx("%s: nargv overflow", __func__);
 
 		/* Control resumes in vmd.c:main(). */
-		execvp(nargv[0], nargv);
+		execv(nargv[0], nargv);
 
 		ret = errno;
 		log_warn("%s: failed to exec device", __func__);

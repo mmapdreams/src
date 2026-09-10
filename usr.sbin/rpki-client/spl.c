@@ -1,4 +1,4 @@
-/*	$OpenBSD: spl.c,v 1.18 2026/06/25 07:51:58 tb Exp $ */
+/*	$OpenBSD: spl.c,v 1.20 2026/09/03 17:19:30 tb Exp $ */
 /*
  * Copyright (c) 2024 Job Snijders <job@fastly.com>
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
@@ -241,6 +241,12 @@ spl_validate(const char *fn, void *obj, struct cert *cert)
 	return 1; /* XXX */
 }
 
+static const ASN1_OBJECT *
+spl_obj_oid(void)
+{
+	return spl_oid;
+}
+
 static void *
 spl_obj_new(size_t der_len, time_t signtime)
 {
@@ -261,60 +267,20 @@ spl_obj_free(void *obj)
 
 static const struct signed_obj spl_signed_obj = {
 	.rtype = RTYPE_SPL,
+
 	.new = spl_obj_new,
 	.free = spl_obj_free,
 	.cert_info = spl_cert_info,
 	.parse_econtent = spl_parse_econtent,
 	.validate = spl_validate,
+
+	.oid = spl_obj_oid,
 };
 
 const struct signed_obj *
 spl_obj(void)
 {
 	return &spl_signed_obj;
-}
-
-/*
- * Parse a full Signed Prefix List file.
- * Returns the SPL, or NULL if the object was malformed.
- */
-struct spl *
-spl_parse(struct cert **out_cert, const char *fn, int talid,
-    const unsigned char *der, size_t len)
-{
-	struct spl	*spl;
-	struct cert	*cert = NULL;
-	size_t		 cmsz;
-	unsigned char	*cms;
-	time_t		 signtime = 0;
-	int		 rc = 0;
-
-	assert(*out_cert == NULL);
-
-	cms = cms_parse_validate(&cert, fn, talid, der, len, spl_oid, &cmsz,
-	    &signtime);
-	if (cms == NULL)
-		return NULL;
-
-	spl = spl_obj_new(len, signtime);
-	if (!spl_cert_info(fn, spl, cert))
-		goto out;
-	if (!spl_parse_econtent(fn, spl, cms, cmsz))
-		goto out;
-	(void)spl_validate(fn, spl, cert);
-
-	*out_cert = cert;
-	cert = NULL;
-
-	rc = 1;
- out:
-	if (rc == 0) {
-		spl_free(spl);
-		spl = NULL;
-	}
-	cert_free(cert);
-	free(cms);
-	return spl;
 }
 
 void

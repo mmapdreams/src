@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.150 2026/08/26 13:13:16 kettenis Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.153 2026/09/08 04:10:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -112,6 +112,7 @@
 #define CPU_PART_NEOVERSE_N3	0xd8e
 #define CPU_PART_CORTEX_A320	0xd8f
 #define CPU_PART_C1_PREMIUM	0xd90
+#define CPU_PART_C2_ULTRA	0xd96
 
 /* Cavium */
 #define CPU_PART_THUNDERX_T88	0x0a1
@@ -145,7 +146,8 @@
 #define CPU_PART_AVALANCHE_MAX	0x039
 
 /* Ampere */
-#define CPU_PART_AMPERE1	0xac3
+#define CPU_PART_AMPERE1_AC03	0xac3
+#define CPU_PART_AMPERE1_AC04	0xac4
 
 #define CPU_IMPL(midr)  (((midr) >> 24) & 0xff)
 #define CPU_PART(midr)  (((midr) >> 4) & 0xfff)
@@ -166,6 +168,7 @@ struct cpu_cores cpu_cores_arm[] = {
 	{ CPU_PART_C1_PREMIUM, "C1-Premium" },
 	{ CPU_PART_C1_PRO, "C1-Pro" },
 	{ CPU_PART_C1_ULTRA, "C1-Ultra" },
+	{ CPU_PART_C2_ULTRA, "C2-Ultra" },
 	{ CPU_PART_CORTEX_A34, "Cortex-A34" },
 	{ CPU_PART_CORTEX_A35, "Cortex-A35" },
 	{ CPU_PART_CORTEX_A53, "Cortex-A53" },
@@ -250,7 +253,8 @@ struct cpu_cores cpu_cores_apple[] = {
 };
 
 struct cpu_cores cpu_cores_ampere[] = {
-	{ CPU_PART_AMPERE1, "AmpereOne" },
+	{ CPU_PART_AMPERE1_AC03, "AmpereOne AC03" },
+	{ CPU_PART_AMPERE1_AC04, "AmpereOne AC04" },
 	{ 0, NULL },
 };
 
@@ -470,7 +474,7 @@ cpu_mitigate_spectre_bhb(struct cpu_info *ci)
 		break;
 	case CPU_IMPL_AMPERE:
 		switch (CPU_PART(ci->ci_midr)) {
-		case CPU_PART_AMPERE1:
+		case CPU_PART_AMPERE1_AC03:
 			ci->ci_trampoline_vectors =
 			    (vaddr_t)trampoline_vectors_loop_11;
 			break;
@@ -1979,6 +1983,11 @@ cpu_boot_secondary(struct cpu_info *ci)
 		__asm volatile("wfe");
 }
 
+#ifdef HIBERNATE
+volatile int cpu_parked __attribute__((section(".hibdata")));
+void cpu_park(struct cpu_info *);
+#endif
+
 void
 cpu_init_secondary(struct cpu_info *ci)
 {
@@ -2002,6 +2011,16 @@ cpu_init_secondary(struct cpu_info *ci)
 
 	while ((ci->ci_flags & CPUF_GO) == 0)
 		__asm volatile("wfe");
+	__asm volatile("dsb sy" ::: "memory");
+
+#ifdef HIBERNATE
+	if (ci->ci_flags & CPUF_PARK) {
+		atomic_setbits_int(&ci->ci_flags, CPUF_PARKED);
+		__asm volatile("dsb sy" ::: "memory");
+		cpu_park(ci);
+		/* NOTREACHED */
+	}
+#endif
 
 	cpu_init();
 
@@ -2248,6 +2267,16 @@ void
 cpu_resume_secondary(struct cpu_info *ci)
 {
 	int timeout = 10000;
+
+#ifdef HIBERNATE
+	if (cpu_parked) {
+		cpu_parked = 0;
+		__asm volatile("dsb sy; sev" ::: "memory");
+
+		/* Wait a bit for APs to unpark themselves */
+		delay(500000);
+	}
+#endif
 
 	if (ci->ci_flags & CPUF_PRESENT)
 		return;

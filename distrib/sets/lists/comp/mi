@@ -907,6 +907,7 @@
 ./usr/include/fido/eddsa.h
 ./usr/include/fido/err.h
 ./usr/include/fido/es256.h
+./usr/include/fido/es384.h
 ./usr/include/fido/param.h
 ./usr/include/fido/rs256.h
 ./usr/include/fido/types.h
@@ -2100,6 +2101,7 @@
 ./usr/share/man/man3/SSL_CTX_set_min_proto_version.3
 ./usr/share/man/man3/SSL_CTX_set_mode.3
 ./usr/share/man/man3/SSL_CTX_set_msg_callback.3
+./usr/share/man/man3/SSL_CTX_set_num_tickets.3
 ./usr/share/man/man3/SSL_CTX_set_options.3
 ./usr/share/man/man3/SSL_CTX_set_quiet_shutdown.3
 ./usr/share/man/man3/SSL_CTX_set_read_ahead.3
@@ -2493,6 +2495,7 @@
 ./usr/share/man/man3/erf.3
 ./usr/share/man/man3/err.3
 ./usr/share/man/man3/es256_pk_new.3
+./usr/share/man/man3/es384_pk_new.3
 ./usr/share/man/man3/ether_aton.3
 ./usr/share/man/man3/evbuffer_new.3
 ./usr/share/man/man3/event.3
@@ -2530,6 +2533,7 @@
 ./usr/share/man/man3/fido_credman_metadata_new.3
 ./usr/share/man/man3/fido_dev_enable_entattest.3
 ./usr/share/man/man3/fido_dev_get_assert.3
+./usr/share/man/man3/fido_dev_get_puat.3
 ./usr/share/man/man3/fido_dev_get_touch_begin.3
 ./usr/share/man/man3/fido_dev_info_manifest.3
 ./usr/share/man/man3/fido_dev_largeblob_get.3
@@ -2632,6 +2636,7 @@
 ./usr/share/man/man3/getdomainname.3
 ./usr/share/man/man3/getdtablesize.3
 ./usr/share/man/man3/getenv.3
+./usr/share/man/man3/getexecpath.3
 ./usr/share/man/man3/getfsent.3
 ./usr/share/man/man3/getgrent.3
 ./usr/share/man/man3/getgrouplist.3

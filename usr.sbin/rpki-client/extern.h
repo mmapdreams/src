@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.291 2026/08/25 08:41:14 job Exp $ */
+/*	$OpenBSD: extern.h,v 1.294 2026/09/03 17:19:30 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -244,6 +244,7 @@ enum location {
 
 struct signed_obj {
 	enum rtype rtype;
+
 	void *(*new)(size_t, time_t);
 	void (*free)(void *);
 	int (*cert_info)(const char *, void *, const struct cert *);
@@ -251,6 +252,8 @@ struct signed_obj {
 	int (*parse_detached)(const char *, void *, BIO *, char *, size_t,
 	    uint8_t **, size_t *);
 	int (*validate)(const char *, void *, struct cert *);
+
+	const ASN1_OBJECT *(*oid)(void);
 };
 
 /*
@@ -776,8 +779,6 @@ void		 nca_tree_remove_cert(struct nca_tree *, int);
 enum rtype	 rtype_from_file_extension(const char *);
 void		 mft_buffer(struct ibuf *, const struct mft *);
 void		 mft_free(struct mft *);
-struct mft	*mft_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
 const struct signed_obj *mft_obj(void);
 struct mft	*mft_read(struct ibuf *);
 int		 mft_compare_issued(const struct mft *, const struct mft *);
@@ -787,8 +788,6 @@ int		 mft_seqnum_gap_present(const struct mft *, const struct mft *,
 
 void		 roa_buffer(struct ibuf *, const struct roa *);
 void		 roa_free(struct roa *);
-struct roa	*roa_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
 const struct signed_obj *roa_obj(void);
 struct roa	*roa_read(struct ibuf *);
 void		 roa_insert_vrps(struct vrp_tree *, struct roa *,
@@ -796,30 +795,22 @@ void		 roa_insert_vrps(struct vrp_tree *, struct roa *,
 
 void		 spl_buffer(struct ibuf *, const struct spl *);
 void		 spl_free(struct spl *);
-struct spl	*spl_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
 const struct signed_obj *spl_obj(void);
 struct spl	*spl_read(struct ibuf *);
 void		 spl_insert_vsps(struct vsp_tree *, struct spl *,
 		    struct repo *);
 
 void		 rsc_free(struct rsc *);
-struct rsc	*rsc_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
 const struct signed_obj *rsc_obj(void);
 
 void		 takey_free(struct takey *);
 void		 tak_free(struct tak *);
-struct tak	*tak_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
 const struct signed_obj *tak_obj(void);
 
 void		 aspa_buffer(struct ibuf *, const struct aspa *);
 void		 aspa_free(struct aspa *);
 void		 aspa_insert_vaps(char *, struct vap_tree *, struct aspa *,
 		    struct repo *);
-struct aspa	*aspa_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
 const struct signed_obj *aspa_obj(void);
 struct aspa	*aspa_read(struct ibuf *);
 
@@ -849,9 +840,8 @@ int		 valid_uuid(const char *);
 int		 valid_spl(const char *, struct cert *, struct spl *);
 
 /* Working with CMS. */
-unsigned char	*cms_parse_validate(struct cert **, const char *, int,
-		    const unsigned char *, size_t, const ASN1_OBJECT *,
-		    size_t *, time_t *);
+void		*signed_object_parse(struct cert **, const char *, enum rtype,
+		    int, const unsigned char *, size_t);
 
 /* Work with RFC 3779 IP addresses, prefixes, ranges. */
 

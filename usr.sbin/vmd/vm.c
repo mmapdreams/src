@@ -1,4 +1,4 @@
-/*	$OpenBSD: vm.c,v 1.127 2026/08/04 19:12:14 claudio Exp $	*/
+/*	$OpenBSD: vm.c,v 1.129 2026/09/08 19:46:18 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -94,8 +94,8 @@ vm_main(int fd, int fd_vmm)
 	/*
 	 * We aren't root, so we can't chroot(2). Use unveil(2) instead.
 	 */
-	if (unveil(env->argv0, "x") == -1)
-		fatal("unveil %s", env->argv0);
+	if (unveil(env->vmd_execpath, "x") == -1)
+		fatal("unveil %s", env->vmd_execpath);
 	if (unveil(NULL, NULL) == -1)
 		fatal("unveil lock");
 
@@ -277,7 +277,7 @@ start_vm(struct vmd_vm *vm, int fd)
 		return (ret);
 	}
 
-	/* Drop privleges further before starting the vcpu run loop(s). */
+	/* Drop privileges further before starting the vcpu run loop(s). */
 	if (pledge("stdio vmm", NULL) == -1)
 		fatal("pledge");
 
@@ -649,7 +649,7 @@ run_vm(struct vmd_vm *vm, struct vcpu_reg_state *vrs)
 		}
 
 		if (sev_activate(vm, i)) {
-			log_warnx("SEV activatation failed for vcpu %zu", i);
+			log_warnx("SEV activation failed for vcpu %zu", i);
 			return (EIO);
 		}
 
@@ -1023,7 +1023,7 @@ vm_pipe_init(struct vm_dev_pipe *p, void (*cb)(int, short, void *))
  * event structure with the given callback and argument.
  *
  * Parameters:
- *  p: pointer to vm_dev_pipe struct to initizlize
+ *  p: pointer to vm_dev_pipe struct to initialize
  *  cb: callback to use for READ events on the read end of the pipe
  *  arg: pointer to pass to the callback on event trigger
  */
@@ -1048,7 +1048,7 @@ vm_pipe_init2(struct vm_dev_pipe *p, void (*cb)(int, short, void *), void *arg)
 /*
  * vm_pipe_send
  *
- * Send a message to an emulated device vie the provided vm_dev_pipe. This
+ * Send a message to an emulated device via the provided vm_dev_pipe. This
  * relies on the fact sizeof(msg) < PIPE_BUF to ensure atomic writes.
  *
  * Parameters:

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mft.c,v 1.141 2026/06/25 07:51:58 tb Exp $ */
+/*	$OpenBSD: mft.c,v 1.143 2026/09/03 17:19:30 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -424,6 +424,12 @@ mft_validate(const char *fn, void *obj, struct cert *cert)
 	return 1;
 }
 
+static const ASN1_OBJECT *
+mft_obj_oid(void)
+{
+	return mft_oid;
+}
+
 static void *
 mft_obj_new(size_t der_len, time_t signtime)
 {
@@ -445,61 +451,20 @@ mft_obj_free(void *obj)
 
 static const struct signed_obj mft_signed_obj = {
 	.rtype = RTYPE_MFT,
+
 	.new = mft_obj_new,
 	.free = mft_obj_free,
 	.cert_info = mft_cert_info,
 	.parse_econtent = mft_parse_econtent,
 	.validate = mft_validate,
+
+	.oid = mft_obj_oid,
 };
 
 const struct signed_obj *
 mft_obj(void)
 {
 	return &mft_signed_obj;
-}
-
-/*
- * Parse the objects that have been published in the manifest.
- * Return mft if it conforms to RFC 9286, otherwise NULL.
- */
-struct mft *
-mft_parse(struct cert **out_cert, const char *fn, int talid,
-    const unsigned char *der, size_t len)
-{
-	struct mft	*mft;
-	struct cert	*cert = NULL;
-	int		 rc = 0;
-	size_t		 cmsz;
-	unsigned char	*cms;
-	time_t		 signtime = 0;
-
-	assert(*out_cert == NULL);
-
-	cms = cms_parse_validate(&cert, fn, talid, der, len, mft_oid, &cmsz,
-	    &signtime);
-	if (cms == NULL)
-		return NULL;
-
-	mft = mft_obj_new(len, signtime);
-	if (!mft_cert_info(fn, mft, cert))
-		goto out;
-	if (!mft_parse_econtent(fn, mft, cms, cmsz))
-		goto out;
-	if (!mft_validate(fn, mft, cert))
-		goto out;
-
-	*out_cert = cert;
-	cert = NULL;
-
-	rc = 1;
- out:
-	if (rc == 0) {
-		mft_free(mft);
-		mft = NULL;
-	}
-	cert_free(cert);
-	free(cms);
-	return mft;
 }
 
 /*
