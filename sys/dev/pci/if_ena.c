@@ -1642,6 +1642,31 @@ ena_rxeof(struct ena_queue *eq)
 			req_id = ena_bufs[i].req_id;
 			rb = &eq->eq_rx_buf[req_id];
 			m = rb->erx_mbuf;
+
+			/*
+			 * A completion naming a slot that holds no mbuf.
+			 * ena_com_rx_pkt() bounds req_id by the CQ depth, so
+			 * the index is in range: this is a stale or duplicated
+			 * completion, and reaping it would dereference NULL.
+			 * The ring's slot accounting is no longer trustworthy,
+			 * so reset, which is how every other unrecoverable
+			 * device fault here is handled.  Printed once per
+			 * reset, not per completion, because this runs in the
+			 * RX interrupt path.
+			 */
+			if (m == NULL) {
+				eq->eq_kst_rx_errors++;
+				if (sc->sc_reset_tq != NULL &&
+				    task_add(sc->sc_reset_tq,
+				    &sc->sc_reset_task)) {
+					printf("%s: RX queue %u completion "
+					    "for empty slot %u, resetting\n",
+					    ENA_DEVNAME(sc), eq->eq_idx,
+					    req_id);
+				}
+				m_freem(mh);
+				goto done;
+			}
 			rb->erx_mbuf = NULL;
 
 			bus_dmamap_sync(sc->sc_dmat, rb->erx_map, 0,
@@ -1694,6 +1719,7 @@ ena_rxeof(struct ena_queue *eq)
 			ml_enqueue(&ml, mh);
 	}
 
+done:
 #ifndef SMALL_KERNEL
 	if (ifiq_input(eq->eq_ifiq, &mltcp))
 		if_rxr_livelocked(&eq->eq_rx_ring);
