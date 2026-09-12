@@ -3271,12 +3271,19 @@ pmap_tlb_shootfail()
 /*
  * KVA TLB entries can exist under PCID_TEMP (pmap_map_ptes() + interrupts/traps),
  * so KVA shootdowns must invalidate PCID_TEMP too.
+ *
+ * The same is true of the recursive self-map: pmap_map_ptes() walks another
+ * pmap's tables through it under PCID_TEMP, and pmap_free_ptp() shoots those
+ * addresses when it zeroes an upper-level PDE.  Those shootdowns must also
+ * reach every running CPU, since pmap_is_active() matches ci_proc_pmap and
+ * cannot see a pmap held only under a temporary CR3.
  */
 
 void
 pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 {
 	int is_kva = va >= VM_MIN_KERNEL_ADDRESS;
+	int is_selfmap = pmap_is_selfmap_va(va);
 #ifdef MULTIPROCESSOR
 	struct cpu_info *ci, *self = curcpu();
 	CPU_INFO_ITERATOR cii;
@@ -3286,7 +3293,7 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
 			continue;
-		if (!is_kva && !pmap_is_active(pm, ci))
+		if (!is_kva && !is_selfmap && !pmap_is_active(pm, ci))
 			continue;
 		setbit(mask, ci->ci_cpuid);
 		targets++;
@@ -3296,7 +3303,8 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 		int s = splvm();
 
 		pmap_start_tlb_shoot(targets, __func__);
-		tlb_shoot_first_pcid = is_kva ? PCID_KERN : PCID_PROC;
+		tlb_shoot_first_pcid = (is_kva || is_selfmap) ?
+		    PCID_KERN : PCID_PROC;
 		tlb_shoot_addr1 = va;
 		CPU_INFO_FOREACH(cii, ci) {
 			if (isclr(mask, ci->ci_cpuid))
@@ -3311,7 +3319,7 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 	if (!pmap_use_pcid) {
 		if (shootself)
 			pmap_update_pg(va);
-	} else if (is_kva) {
+	} else if (is_kva || is_selfmap) {
 		invpcid(INVPCID_ADDR, PCID_PROC, va);
 		invpcid(INVPCID_ADDR, PCID_KERN, va);
 		invpcid(INVPCID_ADDR, PCID_TEMP, va);
@@ -3326,6 +3334,7 @@ void
 pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 {
 	int is_kva = sva >= VM_MIN_KERNEL_ADDRESS;
+	int is_selfmap = pmap_is_selfmap_va(sva);
 	vaddr_t va;
 #ifdef MULTIPROCESSOR
 	struct cpu_info *ci, *self = curcpu();
@@ -3336,7 +3345,7 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
 			continue;
-		if (!is_kva && !pmap_is_active(pm, ci))
+		if (!is_kva && !is_selfmap && !pmap_is_active(pm, ci))
 			continue;
 		setbit(mask, ci->ci_cpuid);
 		targets++;
@@ -3346,7 +3355,8 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 		int s = splvm();
 
 		pmap_start_tlb_shoot(targets, __func__);
-		tlb_shoot_first_pcid = is_kva ? PCID_KERN : PCID_PROC;
+		tlb_shoot_first_pcid = (is_kva || is_selfmap) ?
+		    PCID_KERN : PCID_PROC;
 		tlb_shoot_addr1 = sva;
 		tlb_shoot_addr2 = eva;
 		CPU_INFO_FOREACH(cii, ci) {
@@ -3364,7 +3374,7 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 			for (va = sva; va < eva; va += PAGE_SIZE)
 				pmap_update_pg(va);
 		}
-	} else if (is_kva) {
+	} else if (is_kva || is_selfmap) {
 		for (va = sva; va < eva; va += PAGE_SIZE) {
 			invpcid(INVPCID_ADDR, PCID_PROC, va);
 			invpcid(INVPCID_ADDR, PCID_KERN, va);
