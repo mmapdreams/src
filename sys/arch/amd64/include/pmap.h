@@ -225,6 +225,13 @@ extern vaddr_t pmap_direct_base, pmap_direct_end;
 #define pl_i(va, lvl) \
         (((VA_SIGN_POS(va)) & ptp_masks[(lvl)-1]) >> ptp_shifts[(lvl)-1])
 
+/*
+ * True for the recursive page-table self-map (L4 slot L4_SLOT_PTE).  These
+ * addresses are cached under PCID_TEMP by pmap_map_ptes(), so shootdowns of
+ * them must invalidate PCID_TEMP even though they are not KVA.
+ */
+#define pmap_is_selfmap_va(va)	(pl4_i(va) == L4_SLOT_PTE)
+
 #define PTP_MASK_INITIALIZER	{ L1_FRAME, L2_FRAME, L3_FRAME, L4_FRAME }
 #define PTP_SHIFT_INITIALIZER	{ L1_SHIFT, L2_SHIFT, L3_SHIFT, L4_SHIFT }
 #define NKPTP_INITIALIZER	{ NKL1_START_ENTRIES, NKL2_START_ENTRIES, \
