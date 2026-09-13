@@ -52,6 +52,7 @@
 
 #include <sys/device.h>
 #include <sys/mutex.h>
+#include <sys/timeout.h>
 #include <dev/pv/virtioreg.h>
 #include <dev/pv/virtiovar.h>
 #include <dev/pv/vioblkreg.h>
@@ -117,6 +118,8 @@ struct vioblk_softc {
 
 	uint32_t		 sc_queued;
 
+	struct timeout		 sc_tick;
+
 	uint64_t		 sc_capacity;
 };
 
@@ -124,6 +127,7 @@ int	vioblk_match(struct device *, void *, void *);
 void	vioblk_attach(struct device *, struct device *, void *);
 int	vioblk_alloc_reqs(struct vioblk_softc *, int);
 int	vioblk_vq_done(struct virtqueue *);
+void	vioblk_tick(void *);
 void	vioblk_vq_done1(struct vioblk_softc *, struct virtio_softc *,
 			struct virtqueue *, int);
 void	vioblk_reset(struct vioblk_softc *);
@@ -227,6 +231,8 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_queued = 0;
 
+	timeout_set(&sc->sc_tick, vioblk_tick, sc);
+
 	SLIST_INIT(&sc->sc_freelist);
 	mtx_init(&sc->sc_vr_mtx, IPL_BIO);
 	scsi_iopool_init(&sc->sc_iopool, sc, vioblk_req_get, vioblk_req_put);
@@ -255,6 +261,7 @@ vioblk_attach(struct device *parent, struct device *self, void *aux)
 
 	if (virtio_attach_finish(vsc, va) != 0)
 		goto err;
+	timeout_add_sec(&sc->sc_tick, 1);
 	config_found(self, &saa, scsiprint);
 	return;
 
@@ -308,6 +315,34 @@ vioblk_req_put(void *cookie, void *io)
 	 */
 	SLIST_INSERT_HEAD(&sc->sc_freelist, vr, vr_list);
 	mtx_leave(&sc->sc_vr_mtx);
+}
+
+/*
+ * Recover from a missed completion interrupt.
+ *
+ * A lost virtio interrupt is a known condition under some hypervisors --
+ * if_vio(4) carries the same workaround for its receive queue, added in
+ * sys/dev/pv/if_vio.c r1.79 ("on vmd, sometimes rx interrupts get lost").
+ * The block driver is worse affected than the network one, because it has no
+ * other path back: the only runtime call to virtio_check_vq() is in
+ * vioblk_scsi_cmd() after a *new* request is submitted, and the process that
+ * submitted the lost one is asleep in scsi_base.c's msleep_nsec(..., INFSLP)
+ * with no timeout. So nothing submits, nothing rechecks, and one lost
+ * interrupt stops the guest's block I/O permanently while its network keeps
+ * running -- observed repeatedly on OpenBSD guests under vmd(8), where the
+ * host-side virtqueue shows every request completed and published
+ * (avail == last_avail == used) and the guest never looks again.
+ *
+ * One check per second costs nothing on an idle queue and bounds the damage of
+ * a lost interrupt to a one-second stall.
+ */
+void
+vioblk_tick(void *arg)
+{
+	struct vioblk_softc *sc = arg;
+
+	virtio_check_vq(sc->sc_virtio, &sc->sc_vq[0]);
+	timeout_add_sec(&sc->sc_tick, 1);
 }
 
 int
