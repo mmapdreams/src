@@ -7423,7 +7423,37 @@ vmm_update_pvclock(struct vcpu *vcpu)
 		pvclock_ti->ti_tsc_shift = 12;
 		pvclock_ti->ti_tsc_to_system_mul =
 		    vcpu->vc_pvclock_system_tsc_mul;
-		pvclock_ti->ti_flags = PVCLOCK_FLAG_TSC_STABLE;
+		/*
+		 * Do not claim PVCLOCK_FLAG_TSC_STABLE.  The flag tells the
+		 * guest the pair (ti_system_time, ti_tsc_timestamp) is a stable
+		 * basis it can extrapolate from without a monotonicity check,
+		 * and that is not true here: this function rewrites the pair on
+		 * every vm entry, so a guest reading the page can pair an older
+		 * ti_system_time with a newer rdtsc() (or the reverse) and
+		 * compute an uptime that moves backwards.  The version-guarded
+		 * loop in the guest's pvclock_get() does not prevent it -- both
+		 * values are read inside one consistent version, but the value
+		 * of rdtsc() sampled next is not part of that version.
+		 *
+		 * Clearing the flag makes the guest route its result through
+		 * pvclock_cmp_last(), the monotonic clamp that exists for this
+		 * case, and lowers pvclock's tc_quality from 1500 to 500.
+		 *
+		 * Without this, an OpenBSD guest can deadlock its own clock:
+		 * clockintr_dispatch() only runs a callback when
+		 * cq_uptime >= cl_expiration, so an uptime that oscillates
+		 * below a fixed expiration means hardclock() is never due,
+		 * ticks never advances, and cl_expiration is never pushed
+		 * forward.  Measured on a 96-core amd64 host running 27 guests:
+		 * a wedged guest showed cq_pend populated, cq_dispatch 0, and
+		 * cq_uptime climbing to within 0.19s of hardclock_exp then
+		 * retreating twice, while the host's own ti_system_time in the
+		 * same capture rose monotonically.  Every timeout stops, so
+		 * disk I/O stops, while the network survives because if_vio(4)
+		 * polls its receive ring from its own interrupt.  Only a reboot
+		 * clears it.
+		 */
+		pvclock_ti->ti_flags = 0;
 
 		/* END (must be even) */
 		pvclock_ti->ti_version &= ~0x1;
