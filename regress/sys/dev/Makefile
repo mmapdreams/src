@@ -1,5 +1,6 @@
 #	$OpenBSD: Makefile,v 1.8 2020/03/12 15:40:39 visa Exp $
 
+SUBDIR+=	ena
 SUBDIR+=	fdesc
 SUBDIR+=	kcov
 SUBDIR+=	vnd

@@ -1,0 +1,65 @@
+ENA recovery regression
+=======================
+
+Run `make regress` on OpenBSD, or from the source root:
+
+    sh regress/sys/dev/ena/reset.sh sys/dev/pci/if_ena.c
+
+The test compiles the actual reset task, device recovery function and admin
+interrupt handler from if_ena.c against a small HAL/device model. The model
+starts with an admin queue that no longer completes commands. Reusing that
+queue reproduces the permanent interface-down failure; a device reset and
+fresh admin queues are required to recover. It also checks repeat recovery,
+failed reset DMA retention, initialization failure and retry, identity
+changes, stale reset tasks, and interrupts during admin ring teardown.
+
+Observed failure sequence:
+
+    ena0: keep-alive watchdog timeout, resetting
+    ena0: The ena device didn't send a completion for the admin cmd 2
+    ena0: Failed to destroy io sq error: 60
+    ena0: Failed to create IO CQ. error: 19
+    ena0: failed to create IO queues
+
+The first failing command is DESTROY_SQ. Its timeout sets the HAL admin
+queue's running_state to false, so CREATE_CQ returns ENODEV without reaching
+the device. The old reset task only called ena_stop/ena_init and never reset
+the device or rebuilt AQ/ACQ/AENQ. A host reboot restored networking.
+The evidence does not identify the cause of the initial missing keep-alive.
+Disassembly of the live /bsd also confirmed that its reset task called only
+ena_stop and ena_init.
+
+This model does not emulate DMA, MMIO or MSI-X hardware. Native kernel build
+and fault injection on a disposable ENA host are separate validation steps.
+
+Hardware regression
+-------------------
+
+inject.awk makes a TEST-ONLY copy of if_ena.c that resets the NIC's hardware
+without rebuilding its queues at 90 and 180 seconds of uptime. This removes
+the admin/AENQ and I/O queues underneath the running driver. The ordinary
+keep-alive watchdog must then restore the device and resume network traffic.
+
+    awk -f regress/sys/dev/ena/inject.awk sys/dev/pci/if_ena.c > if_ena.test.c
+
+Use that copy in a separate kernel build tree, never the production source
+or a production host. Retain a known-good boot kernel and an independent
+recovery path. Monitor traffic from another host through both injections;
+check the watchdog messages, ena-txq reset counters, packet counters, and
+continued SSH connectivity. Restore the test host's original kernel after
+the test. The injector is not part of the normal kernel or `make regress`.
+
+Validation results
+------------------
+
+The GENERIC.MP kernel built on native OpenBSD with -Werror, and all eight
+model regression cases passed. The updated manual page passed mandoc lint.
+
+On ENA hardware, the patched driver recovered from both queue-loss
+injections. All eight transmit queues recorded two resets, packet traffic
+resumed, and an established SSH session survived both recoveries.
+
+The original driver, built with the same injector, reproduced the failure
+sequence above after the first injection and remained unreachable until an
+external reboot. The test host's original boot kernel was restored before
+fault injection so that this reboot could recover it.
