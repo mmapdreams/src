@@ -45,6 +45,18 @@ SR-IOV virtual function.
 The driver negotiates the number of hardware queues, the receive and
 transmit ring sizes, and any supported checksum offload capabilities
 with the device at attach time.
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "ena%d: keep-alive watchdog timeout, resetting"
+The device stopped sending keep-alive notifications.
+The driver resets the device and rebuilds its administration and I/O queues.
+.It "ena%d: device recovery failed: %d"
+The device could not be reset or its queues could not be restored.
+The interface remains down.
+Bringing the interface down and up with
+.Xr ifconfig 8
+retries recovery.
+.El
 .Sh SEE ALSO
 .Xr arp 4 ,
 .Xr ifmedia 4 ,

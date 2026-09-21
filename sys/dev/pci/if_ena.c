@@ -129,6 +129,9 @@ void	ena_config_llq(struct ena_softc *,
 unsigned int ena_tx_push_len(struct ena_queue *, struct mbuf *);
 int	ena_device_init(struct ena_softc *,
 	    struct ena_com_dev_get_features_ctx *);
+int	ena_admin_init(struct ena_softc *,
+	    struct ena_com_dev_get_features_ctx *);
+int	ena_reset_device(struct ena_softc *);
 int	ena_setup_interrupts(struct ena_softc *, struct pci_attach_args *);
 void	ena_setup_ifp(struct ena_softc *, uint8_t *);
 unsigned int ena_calc_max_io_queues(struct ena_softc *,
@@ -145,6 +148,7 @@ void	ena_rss_configure(struct ena_softc *);
 int	ena_ioctl(struct ifnet *, u_long, caddr_t);
 int	ena_init(struct ena_softc *);
 void	ena_stop(struct ena_softc *);
+void	ena_quiesce(struct ena_softc *);
 void	ena_start(struct ifqueue *);
 void	ena_watchdog(struct ifnet *);
 int	ena_media_change(struct ifnet *);
@@ -403,6 +407,8 @@ ena_attach(struct device *parent, struct device *self, void *aux)
 	if (ena_calc_io_queue_size(sc, &feat) != 0)
 		goto destroy_dev;
 
+	membar_producer();
+	atomic_store_int(&sc->sc_admin_up, 1);
 	if (ena_setup_interrupts(sc, pa) != 0) {
 		printf(": interrupt setup failed\n");
 		goto destroy_dev;
@@ -473,42 +479,29 @@ ena_detach(struct device *self, int flags)
 		return (0);
 
 	/*
-	 * Quiesce the datapath: clears IFF_RUNNING/sc_up, kills the tick,
-	 * barriers the IO interrupts and tears down the IO queues.
+	 * Quiesce software users, retaining DMA memory until the device has
+	 * stopped.  A previous recovery may have failed to reset the device.
 	 */
-	ena_stop(sc);
-
-	/*
-	 * ena_stop only timeout_del()s the tick and the per-queue RX refill
-	 * timeouts, which does not wait for a callback already running.  Both
-	 * re-arm themselves (ena_tick unconditionally, ena_rx_fill when the RX
-	 * ring is empty), so an in-flight callback can re-queue the timeout
-	 * after ena_stop's timeout_del.  ena_stop has fenced the IO interrupts,
-	 * so the refill can no longer be re-armed from an ISR; the only live
-	 * re-arm source left is the running callback itself.  timeout_del_barrier
-	 * waits it out, then a second timeout_del cancels the entry it re-queued,
-	 * before the softc / queue array backing the timeouts is freed.
-	 */
-	timeout_del_barrier(&sc->sc_tick);
-	timeout_del(&sc->sc_tick);
-	for (i = 0; i < sc->sc_nqueues; i++) {
-		timeout_del_barrier(&sc->sc_queues[i].eq_rx_refill);
-		timeout_del(&sc->sc_queues[i].eq_rx_refill);
-	}
+	ena_quiesce(sc);
 
 	/*
 	 * The device keeps posting keep-alive AENQs ~1/s regardless of
 	 * IFF_RUNNING, and the admin interrupt handler task_add()s the link
-	 * task.  Stop new admin completions and FLR the device (pure MMIO, no
+	 * task.  Stop new admin completions and reset the device (pure MMIO, no
 	 * admin/AENQ dependency) before tearing the admin path down.
 	 */
-	ena_com_set_admin_running_state(ena_dev, false);
-	ena_com_dev_reset(ena_dev, ENA_REGS_RESET_NORMAL);
+	atomic_store_int(&sc->sc_admin_up, 0);
+	membar_sync();
+	ena_com_set_admin_polling_mode(ena_dev, true);
+	intr_barrier(sc->sc_admin_ih);
+	if (sc->sc_admin_initialized)
+		ena_com_set_admin_running_state(ena_dev, false);
+	if (ena_com_dev_reset(ena_dev, ENA_REGS_RESET_NORMAL) != 0)
+		return (EBUSY);
+	ena_destroy_io_queues(sc);
 
 	/*
-	 * ena_stop already barriered sc_admin_ih, but a keep-alive AENQ may
-	 * have fired again before the FLR; fence any in-flight admin handler,
-	 * then disestablish it so no further link task can be queued.
+	 * The admin handler can no longer touch its rings or queue link tasks.
 	 */
 	intr_barrier(sc->sc_admin_ih);
 	pci_intr_disestablish(sc->sc_pc, sc->sc_admin_ih);
@@ -537,7 +530,8 @@ ena_detach(struct device *self, int flags)
 
 	/* Tear down the admin queues and the mmio readless mechanism. */
 	ena_com_delete_host_info(ena_dev);
-	ena_com_admin_destroy(ena_dev);
+	if (sc->sc_admin_initialized)
+		ena_com_admin_destroy(ena_dev);
 	ena_com_mmio_reg_read_request_destroy(ena_dev);
 
 	/* Release the per-queue interrupts, the queue array and the map. */
@@ -694,8 +688,7 @@ int
 ena_device_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 {
 	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
-	uint32_t aenq_groups;
-	int rc, dma_width;
+	int rc;
 	bool readless = true;
 
 	rc = ena_com_mmio_reg_read_request_init(ena_dev);
@@ -708,19 +701,40 @@ ena_device_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 	if (rc != 0)
 		goto err_mmio;
 
+	rc = ena_admin_init(sc, feat);
+	if (rc == 0)
+		return (0);
+
+	ena_com_delete_host_info(ena_dev);
+	if (sc->sc_admin_initialized) {
+		ena_com_admin_destroy(ena_dev);
+		sc->sc_admin_initialized = 0;
+	}
+err_mmio:
+	ena_com_mmio_reg_read_request_destroy(ena_dev);
+	return (rc);
+}
+
+/* The caller owns cleanup; recovery must stop DMA before freeing rings. */
+int
+ena_admin_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	uint32_t aenq_groups;
+	int rc, dma_width;
+
 	rc = ena_com_validate_version(ena_dev);
 	if (rc != 0)
-		goto err_mmio;
+		return (rc);
 
 	dma_width = ena_com_get_dma_width(ena_dev);
-	if (dma_width < 0) {
-		rc = dma_width;
-		goto err_mmio;
-	}
+	if (dma_width < 0)
+		return (dma_width);
 
 	rc = ena_com_admin_init(ena_dev, &ena_aenq_handlers);
 	if (rc != 0)
-		goto err_mmio;
+		return (rc);
+	sc->sc_admin_initialized = 1;
 
 	/* Polled admin keeps the bring-up path free of wait-events. */
 	ena_com_set_admin_polling_mode(ena_dev, true);
@@ -729,25 +743,18 @@ ena_device_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 
 	rc = ena_com_get_dev_attr_feat(ena_dev, feat);
 	if (rc != 0)
-		goto err_admin;
+		return (rc);
 
 	aenq_groups = BIT(ENA_ADMIN_LINK_CHANGE) | BIT(ENA_ADMIN_KEEP_ALIVE) |
 	    BIT(ENA_ADMIN_FATAL_ERROR) | BIT(ENA_ADMIN_WARNING);
 	aenq_groups &= feat->aenq.supported_groups;
 	rc = ena_com_set_aenq_config(ena_dev, aenq_groups);
 	if (rc != 0)
-		goto err_admin;
+		return (rc);
 
 	ena_config_llq(sc, feat);
 
 	return (0);
-
-err_admin:
-	ena_com_delete_host_info(ena_dev);
-	ena_com_admin_destroy(ena_dev);
-err_mmio:
-	ena_com_mmio_reg_read_request_destroy(ena_dev);
-	return (rc);
 }
 
 /*
@@ -1228,6 +1235,14 @@ ena_init(struct ena_softc *sc)
 	if (ISSET(ifp->if_flags, IFF_RUNNING))
 		ena_stop(sc);
 
+	/* A failed recovery can be retried by bringing the interface up. */
+	if (!atomic_load_int(&sc->sc_admin_up) ||
+	    !ena_com_get_admin_running_state(sc->sc_ena_dev)) {
+		rc = ena_reset_device(sc);
+		if (rc != 0)
+			return (rc);
+	}
+
 	rc = ena_create_io_queues(sc);
 	if (rc != 0) {
 		printf("%s: failed to create IO queues\n", ENA_DEVNAME(sc));
@@ -1273,9 +1288,8 @@ ena_init(struct ena_softc *sc)
 	 * this a freshly (re)created completion queue is left masked: the
 	 * device writes TX/RX completions but raises no interrupt, ena_txeof()
 	 * never runs, and TX wedges until a full device reset.  This bites the
-	 * ena_reset_task (ena_stop + ena_init) recovery path, which -- unlike
-	 * attach -- does not reset the device to implicitly re-bootstrap the
-	 * vector.  Use the same rearm as ena_intr_queue().
+	 * interface down/up path, which does not reset the device to implicitly
+	 * re-bootstrap the vector.  Use the same rearm as ena_intr_queue().
 	 */
 	for (i = 0; i < sc->sc_nqueues; i++) {
 		struct ena_queue *eq = &sc->sc_queues[i];
@@ -1300,6 +1314,14 @@ ena_init(struct ena_softc *sc)
 void
 ena_stop(struct ena_softc *sc)
 {
+	ena_quiesce(sc);
+	ena_destroy_io_queues(sc);
+}
+
+/* Stop software users without releasing memory still accessible by DMA. */
+void
+ena_quiesce(struct ena_softc *sc)
+{
 	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
 	unsigned int i;
 
@@ -1320,7 +1342,13 @@ ena_stop(struct ena_softc *sc)
 	for (i = 0; i < sc->sc_nqueues; i++)
 		intr_barrier(sc->sc_queues[i].eq_ih);
 
-	ena_destroy_io_queues(sc);
+	/* A callback may have rearmed itself before the datapath stopped. */
+	timeout_del_barrier(&sc->sc_tick);
+	timeout_del(&sc->sc_tick);
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		timeout_del_barrier(&sc->sc_queues[i].eq_rx_refill);
+		timeout_del(&sc->sc_queues[i].eq_rx_refill);
+	}
 }
 
 /* ------------------------------------------------------------------------ *
@@ -1519,6 +1547,10 @@ ena_queue_free(struct ena_softc *sc, struct ena_queue *eq)
 		    eq->eq_tx_ring_size * sizeof(uint16_t));
 		eq->eq_tx_free_ids = NULL;
 	}
+	if (eq->eq_tx_push_buf != NULL) {
+		free(eq->eq_tx_push_buf, M_DEVBUF, eq->eq_tx_push_max);
+		eq->eq_tx_push_buf = NULL;
+	}
 }
 
 /* ------------------------------------------------------------------------ *
@@ -1597,7 +1629,8 @@ ena_rx_refill(void *arg)
 	struct ena_queue *eq = arg;
 
 	mtx_enter(&eq->eq_rx_mtx);
-	ena_rx_fill(eq);
+	if (eq->eq_sc->sc_up)
+		ena_rx_fill(eq);
 	mtx_leave(&eq->eq_rx_mtx);
 }
 
@@ -2094,6 +2127,10 @@ ena_intr_admin(void *arg)
 	struct ena_softc *sc = arg;
 	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
 
+	if (!atomic_load_int(&sc->sc_admin_up))
+		return (0);
+	membar_consumer();
+
 	ena_com_admin_q_comp_intr_handler(ena_dev);
 	ena_com_aenq_intr_handler(ena_dev, sc);
 
@@ -2175,16 +2212,98 @@ ena_reset_task(void *arg)
 	struct ena_softc *sc = arg;
 	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
 	unsigned int i;
-	int s;
+	int error, s;
 
+	NET_LOCK();
 	s = splnet();
 	if (ISSET(ifp->if_flags, IFF_RUNNING)) {
 		for (i = 0; i < sc->sc_nqueues; i++)
 			sc->sc_queues[i].eq_kst_resets++;
-		ena_stop(sc);
-		ena_init(sc);
+		error = ena_reset_device(sc);
+		if (error == 0)
+			error = ena_init(sc);
+		if (error != 0) {
+			ifp->if_link_state = LINK_STATE_DOWN;
+			if_link_state_change(ifp);
+			printf("%s: device recovery failed: %d\n",
+			    ENA_DEVNAME(sc), error);
+		}
 	}
 	splx(s);
+	NET_UNLOCK();
+}
+
+int
+ena_reset_device(struct ena_softc *sc)
+{
+	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
+	struct ena_com_dev_get_features_ctx feat;
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	unsigned int tx_size = sc->sc_tx_ring_size;
+	unsigned int rx_size = sc->sc_rx_ring_size;
+	int error;
+
+	ena_quiesce(sc);
+	atomic_store_int(&sc->sc_admin_up, 0);
+	membar_sync();
+	ena_com_set_admin_polling_mode(ena_dev, true);
+	intr_barrier(sc->sc_admin_ih);
+	if (sc->sc_admin_initialized)
+		ena_com_set_admin_running_state(ena_dev, false);
+
+	/*
+	 * DESTROY_SQ cannot recover an unresponsive admin queue.  Reset via
+	 * MMIO first, without submitting another admin command.  Do not free
+	 * any DMA memory if the device fails to acknowledge the reset.
+	 */
+	error = ena_com_dev_reset(ena_dev, ENA_REGS_RESET_GENERIC);
+	if (error != 0)
+		return (error);
+
+	ena_destroy_io_queues(sc);
+	if (sc->sc_rss_ready) {
+		ena_com_rss_destroy(ena_dev);
+		sc->sc_rss_ready = 0;
+	}
+	ena_com_delete_host_info(ena_dev);
+	if (sc->sc_admin_initialized) {
+		ena_com_admin_destroy(ena_dev);
+		sc->sc_admin_initialized = 0;
+	}
+
+	/* Rebuild AQ/ACQ/AENQ and publish host attributes in polling mode. */
+	error = ena_admin_init(sc, &feat);
+	if (error != 0)
+		goto fail;
+
+	/* Existing ifqueues and advertised capabilities must still fit. */
+	if (memcmp(feat.dev_attr.mac_addr, sc->sc_arpcom.ac_enaddr,
+	    ETHER_ADDR_LEN) != 0 || feat.dev_attr.max_mtu < ifp->if_mtu ||
+	    (feat.offload.tx & sc->sc_tx_offload_cap) != sc->sc_tx_offload_cap ||
+	    ena_calc_max_io_queues(sc, &feat) < sc->sc_nqueues) {
+		error = ENXIO;
+		goto fail;
+	}
+	error = ena_calc_io_queue_size(sc, &feat);
+	if (error != 0 || sc->sc_tx_ring_size < tx_size ||
+	    sc->sc_rx_ring_size < rx_size)
+		error = ENXIO;
+	sc->sc_tx_ring_size = tx_size;
+	sc->sc_rx_ring_size = rx_size;
+	if (error != 0)
+		goto fail;
+
+	membar_producer();
+	atomic_store_int(&sc->sc_admin_up, 1);
+	ena_com_admin_aenq_enable(ena_dev);
+	ena_com_set_admin_polling_mode(ena_dev, false);
+	return (0);
+
+fail:
+	/* Retain the new DMA allocations until the next acknowledged reset. */
+	if (sc->sc_admin_initialized)
+		ena_com_set_admin_running_state(ena_dev, false);
+	return (error);
 }
 
 #if NKSTAT > 0

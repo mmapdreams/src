@@ -209,6 +209,8 @@ struct ena_softc {
 	struct ena_com_dev	*sc_ena_dev;
 
 	void			*sc_admin_ih;	/* vector 0 cookie */
+	unsigned int		 sc_admin_up;	/* admin interrupt may use rings */
+	int			 sc_admin_initialized;
 
 	struct intrmap		*sc_intrmap;
 	unsigned int		 sc_nqueues;
