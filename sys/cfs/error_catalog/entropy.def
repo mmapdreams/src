@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: ISC
+ *
+ * entropy.def -- canonical entropy-domain native status rows.
+ * Define CFS_ERROR_STATUS_OK and CFS_ERROR_STATUS_NEGATIVE before inclusion.
+ * Negative rows carry native value, POSIX presentation, and documentation.
+ */
+
+#ifndef CFS_ERROR_STATUS_OK
+#error "define CFS_ERROR_STATUS_OK before including entropy.def"
+#endif
+#ifndef CFS_ERROR_STATUS_NEGATIVE
+#error "define CFS_ERROR_STATUS_NEGATIVE before including entropy.def"
+#endif
+
+CFS_ERROR_STATUS_OK(CFS_ENTROPY_OK, 0)
+CFS_ERROR_STATUS_NEGATIVE(CFS_ENTROPY_EINVAL, -1, CFS_ERROR_POSIX(EINVAL),
+    "Entropy arguments, scratch state, ranges, or aliases are invalid.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_ENTROPY_EIO, -2, CFS_ERROR_POSIX(EIO),
+    "Entropy source failed, stalled, or returned malformed progress.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_ENTROPY_ENOSPC, -3, CFS_ERROR_POSIX(ENOMEM),
+    "Caller-provided entropy staging workspace is exhausted.")

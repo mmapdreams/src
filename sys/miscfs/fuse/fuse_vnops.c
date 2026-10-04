@@ -68,6 +68,8 @@ int	fusefs_islocked(void *);
 int	fusefs_advlock(void *);
 int	fusefs_fsync(void *);
 
+static int fusefs_sync(struct vnode *, struct proc *, int);
+
 /* Prototypes for fusefs kqfilter */
 int	filt_fusefsread(struct knote *, long);
 int	filt_fusefswrite(struct knote *, long);
@@ -1288,8 +1290,9 @@ fusefs_write(void *v)
 	struct fusefs_node *ip;
 	struct fusefs_mnt *fmp;
 	struct fusebuf *fbuf = NULL;
-	size_t len, diff;
-	int error;
+	size_t len, diff, resid, written = 0;
+	off_t offset;
+	int error, sync_error;
 
 	ip = VTOI(vp);
 	fmp = ip->i_fmp;
@@ -1316,6 +1319,8 @@ fusefs_write(void *v)
 	}
 
 	while (uio->uio_resid > 0) {
+		resid = uio->uio_resid;
+		offset = uio->uio_offset;
 		len = MIN(uio->uio_resid, fmp->max_write);
 		fbuf = fb_setup(len, ip->i_number, FUSE_WRITE, p);
 
@@ -1325,34 +1330,56 @@ fusefs_write(void *v)
 
 		if ((error = uiomove(fbuf->fb_dat, len, uio))) {
 			DPRINTF("uio error %i\n", error);
-			break;
+		} else {
+			error = fb_queue(fmp->dev, fbuf);
 		}
 
-		error = fb_queue(fmp->dev, fbuf);
-
-		if (error)
+		if (error == 0 && fbuf->op.out.write.size > len)
+			error = EINVAL;
+		if (error) {
+			/* Copying input is not acknowledgement by the daemon. */
+			uio->uio_resid = resid;
+			uio->uio_offset = offset;
 			break;
+		}
 
 		diff = len - fbuf->op.out.write.size;
-		if (fbuf->op.out.write.size > len) {
-			error = EINVAL;
-			break;
-		}
-
 		uio->uio_resid += diff;
 		uio->uio_offset -= diff;
+		written += fbuf->op.out.write.size;
 
-		if (uio->uio_offset > ip->filesize) {
-			ip->filesize = uio->uio_offset;
-			uvm_vnp_setsize(vp, uio->uio_offset);
+		if (fbuf->op.out.write.size != 0) {
+			if (uio->uio_offset > ip->filesize) {
+				ip->filesize = uio->uio_offset;
+				uvm_vnp_setsize(vp, uio->uio_offset);
+			}
+			uvm_vnp_uncache(vp);
 		}
-		uvm_vnp_uncache(vp);
+
+		/* uiomove advanced the input iovecs past the entire request. */
+		if (diff != 0)
+			break;
 
 		fb_delete(fbuf);
 		fbuf = NULL;
 	}
 
 	fb_delete(fbuf);
+	/*
+	 * Open flags cannot identify synchronous writes: handles are shared
+	 * by access mode.  Honor the per-call requirement after all accepted
+	 * bytes, including when a later chunk failed or was short.
+	 */
+	if ((ioflag & IO_SYNC) && written != 0) {
+		sync_error = fusefs_sync(vp, p, 1);
+		if (sync_error != 0) {
+			/* Do not let dofilewritev turn this into short success. */
+			if (sync_error == EINTR || sync_error == ERESTART ||
+			    sync_error == EWOULDBLOCK)
+				sync_error = EIO;
+			error = sync_error;
+		}
+	}
 	return (error);
 }
 
@@ -1710,42 +1737,37 @@ fusefs_advlock(void *v)
 	    ap->a_op, ap->a_fl, ap->a_flags));
 }
 
-int
-fusefs_fsync(void *v)
+static int
+fusefs_sync(struct vnode *vp, struct proc *p, int required)
 {
-	struct vop_fsync_args *ap = v;
-	struct vnode *vp = ap->a_vp;
-	struct proc *p = ap->a_p;
 	struct fusefs_node *ip;
 	struct fusefs_mnt *fmp;
 	struct fusefs_filehandle *fufh;
 	struct fusebuf *fbuf;
-	int type, error = 0;
-
-	/*
-	 * Can't write to directory file handles so no need to fsync.
-	 * FUSE has fsyncdir but it doesn't make sense on OpenBSD.
-	 */
-	if (vp->v_type == VDIR)
-		return (0);
+	uint32_t unsupported;
+	int op, type, error = 0;
 
 	ip = VTOI(vp);
 	fmp = ip->i_fmp;
+	op = vp->v_type == VDIR ? FUSE_FSYNCDIR : FUSE_FSYNC;
+	unsupported = vp->v_type == VDIR ? UNDEF_FSYNCDIR : UNDEF_FSYNC;
 
 	if (!fmp->sess_init)
 		return (ENXIO);
 
-	/* Implementing fsync is optional so don't error. */
-	if (fmp->undef_op & UNDEF_FSYNC)
-		return (0);
+	/*
+	 * Preserve optional fsync for ordinary callers.  IO_SYNC requires
+	 * a successful daemon sync, even after ENOSYS has been remembered.
+	 */
+	if (fmp->undef_op & unsupported)
+		return (required ? ENOSYS : 0);
 
-	/* Sync all writeable file descriptors. */
+	/* Read-only handles can also request file or directory durability. */
 	for (type = 0; type < FUFH_MAXTYPE; type++) {
 		fufh = &(ip->fufh[type]);
-		if (fufh->fh_type == FUFH_WRONLY ||
-		    fufh->fh_type == FUFH_RDWR) {
+		if (fufh->fh_type != FUFH_INVALID) {
 
-			fbuf = fb_setup(0, ip->i_number, FUSE_FSYNC, p);
+			fbuf = fb_setup(0, ip->i_number, op, p);
 			fbuf->op.in.fsync.fh = fufh->fh_id;
 
 			/*
@@ -1754,7 +1776,7 @@ fusefs_fsync(void *v)
 			 */
 			fbuf->op.in.fsync.fsync_flags = 0;
 
-			/* Always behave as if ap->a_waitfor = MNT_WAIT. */
+			/* Always wait for completion, including IO_SYNC writes. */
 			error = fb_queue(fmp->dev, fbuf);
 			fb_delete(fbuf);
 			if (error)
@@ -1763,11 +1785,18 @@ fusefs_fsync(void *v)
 	}
 
 	if (error == ENOSYS) {
-		fmp->undef_op |= UNDEF_FSYNC;
+		fmp->undef_op |= unsupported;
 
-		/* Implementing fsync is optional so don't error. */
-		return (0);
+		return (required ? ENOSYS : 0);
 	}
 
 	return (error);
+}
+
+int
+fusefs_fsync(void *v)
+{
+	struct vop_fsync_args *ap = v;
+
+	return (fusefs_sync(ap->a_vp, ap->a_p, 0));
 }

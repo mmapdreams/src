@@ -1,0 +1,69 @@
+/* SPDX-License-Identifier: ISC
+ * branch_store.def -- native development branch-store status vocabulary.
+ */
+
+#ifndef CFS_ERROR_STATUS_OK
+#error "CFS_ERROR_STATUS_OK must be defined"
+#endif
+#ifndef CFS_ERROR_STATUS_NEGATIVE
+#error "CFS_ERROR_STATUS_NEGATIVE must be defined"
+#endif
+
+CFS_ERROR_STATUS_OK(CFS_BS_OK, 0)
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EINVAL, -1,
+    CFS_ERROR_POSIX(EINVAL),
+    "Branch-store argument or request shape is invalid.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EIO, -2,
+    CFS_ERROR_POSIX(EIO),
+    "Branch-store device operation failed; reopen before retrying.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ECORRUPT, -3,
+    CFS_ERROR_POSIX(EBADMSG),
+    "Branch-store persistent framing or ownership is corrupt.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ENOSPC, -4,
+    CFS_ERROR_POSIX(ENOSPC),
+    "Branch-store admission reserve or catalog capacity is exhausted.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ECONFLICT, -5,
+    CFS_ERROR_POSIX(EAGAIN),
+    "Branch-store expected revision does not match the current head.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ENOENT, -6,
+    CFS_ERROR_POSIX(ENOENT),
+    "Branch-store identity or retained object does not exist.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EEXIST, -7,
+    CFS_ERROR_POSIX(EEXIST),
+    "Branch-store catalog name or ordered key already exists.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EWORKSPACE, -8,
+    CFS_ERROR_POSIX(ENOMEM),
+    "Branch-store caller workspace or output capacity is insufficient.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EOVERFLOW, -9,
+    CFS_ERROR_POSIX(EOVERFLOW),
+    "Branch-store identity, generation, or ownership arithmetic overflowed.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EPOISON, -10,
+    CFS_ERROR_POSIX(EIO),
+    "Branch-store owner requires reopen and recovery after device failure.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ENOTDIR, -11,
+    CFS_ERROR_POSIX(ENOTDIR),
+    "Branch filesystem operation requires a directory inode.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EISDIR, -12,
+    CFS_ERROR_POSIX(EISDIR),
+    "Branch file operation cannot target a directory inode.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ENOTEMPTY, -13,
+    CFS_ERROR_POSIX(ENOTEMPTY),
+    "Branch filesystem directory is not empty.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ELOOP, -14,
+    CFS_ERROR_POSIX(ELOOP),
+    "Branch pathname followed too many symbolic links.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ENAMETOOLONG, -15,
+    CFS_ERROR_POSIX(ENAMETOOLONG),
+    "Branch pathname or component exceeds its length limit.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EMFILE, -16,
+    CFS_ERROR_POSIX(EMFILE),
+    "Branch session handle capacity is exhausted.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_ENFILE, -17,
+    CFS_ERROR_POSIX(ENFILE),
+    "Branch session consumer probe window is exhausted.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EBADF, -18,
+    CFS_ERROR_POSIX(EBADF),
+    "Branch session handle token is invalid or stale.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BS_EBUSY, -19,
+    CFS_ERROR_POSIX(EBUSY),
+    "Branch image has an admitted construction awaiting publication or cancellation.")

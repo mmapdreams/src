@@ -341,7 +341,8 @@ retry:
 		 */
 		error = VOP_GETATTR(nvp, &vattr, curproc->p_ucred, curproc);
 		if (error) {
-			vrele(nvp);
+			/* fuse_ihashins() returned the vnode locked. */
+			vput(nvp);
 			return (error);
 		}
 		ip->filesize = vattr.va_size;
@@ -376,11 +377,16 @@ fusefs_init(struct vfsconf *vfc)
 
 extern int stat_fbufs_in, stat_fbufs_wait, stat_opened_fusedev;
 
+/* Version 1 supplies per-write IO_SYNC and file/directory sync dispatch. */
+static int fusefs_durability_version = 1;
+
 const struct sysctl_bounded_args fusefs_vars[] = {
 	{ FUSEFS_OPENDEVS, &stat_opened_fusedev, SYSCTL_INT_READONLY },
 	{ FUSEFS_INFBUFS, &stat_fbufs_in, SYSCTL_INT_READONLY },
 	{ FUSEFS_WAITFBUFS, &stat_fbufs_wait, SYSCTL_INT_READONLY },
 	{ FUSEFS_POOL_NBPAGES, &fusefs_fbuf_pool.pr_npages, SYSCTL_INT_READONLY },
+	{ FUSEFS_DURABILITY_VERSION, &fusefs_durability_version,
+	    SYSCTL_INT_READONLY },
 };
 
 int

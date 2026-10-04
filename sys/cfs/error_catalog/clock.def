@@ -1,0 +1,22 @@
+/* SPDX-License-Identifier: ISC
+ *
+ * clock.def -- canonical clock-domain native status rows.
+ * Define CFS_ERROR_STATUS_OK and CFS_ERROR_STATUS_NEGATIVE before inclusion.
+ * Negative rows carry native value, POSIX presentation, and documentation.
+ */
+
+#ifndef CFS_ERROR_STATUS_OK
+#error "define CFS_ERROR_STATUS_OK before including clock.def"
+#endif
+#ifndef CFS_ERROR_STATUS_NEGATIVE
+#error "define CFS_ERROR_STATUS_NEGATIVE before including clock.def"
+#endif
+
+CFS_ERROR_STATUS_OK(CFS_CLOCK_OK, 0)
+CFS_ERROR_STATUS_NEGATIVE(CFS_CLOCK_EINVAL, -1, CFS_ERROR_POSIX(EINVAL),
+    "Clock seam, selected callback, or output argument is missing.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_CLOCK_EIO, -2, CFS_ERROR_POSIX(EIO),
+    "Host clock operation failed or a provider returned an undeclared result.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_CLOCK_ERANGE, -3, CFS_ERROR_POSIX(ERANGE),
+    "Host clock representation is malformed or cannot be represented in "
+    "nanoseconds.")

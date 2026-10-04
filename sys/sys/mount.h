@@ -325,6 +325,7 @@ struct statfs {
 #define	MOUNT_UDF	"udf"		/* UDF */
 #define	MOUNT_TMPFS	"tmpfs"		/* tmpfs */
 #define	MOUNT_FUSEFS	"fuse"		/* FUSE */
+#define	MOUNT_CFS	"cfs"		/* cfs */
 
 /*
  * Structure per mounted file system.  Each mounted file system has an
@@ -554,6 +555,7 @@ extern	const struct vfsops ext2fs_vfsops;
 extern	const struct vfsops ntfs_vfsops;
 extern	const struct vfsops udf_vfsops;
 extern	const struct vfsops fusefs_vfsops;
+extern	const struct vfsops cfs_vfsops;
 extern	const struct vfsops tmpfs_vfsops;
 
 #include <net/radix.h>

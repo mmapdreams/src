@@ -23,7 +23,8 @@
 #define FUSEFS_INFBUFS		2	/* # of in fbufs */
 #define FUSEFS_WAITFBUFS	3	/* # of fbufs waiting for a response */
 #define FUSEFS_POOL_NBPAGES	4	/* # total fusefs size */
-#define FUSEFS_MAXID		5	/* number of valid fusefs ids */
+#define FUSEFS_DURABILITY_VERSION	5	/* write and sync protocol */
+#define FUSEFS_MAXID		6	/* number of valid fusefs ids */
 
 #define FUSEFS_NAMES { \
 	{ 0, 0}, \
@@ -31,6 +32,7 @@
 	{ "fusefs_fbufs_in", CTLTYPE_INT }, \
 	{ "fusefs_fbufs_wait", CTLTYPE_INT }, \
 	{ "fusefs_pool_pages", CTLTYPE_INT }, \
+	{ "fusefs_durability_version", CTLTYPE_INT }, \
 }
 
 #ifdef _KERNEL
@@ -60,6 +62,7 @@ struct fusefs_mnt {
 #define UNDEF_MKNOD	1<<10
 #define UNDEF_FLUSH	1<<11
 #define UNDEF_FSYNC	1<<12
+#define UNDEF_FSYNCDIR	1<<13
 
 extern const struct vops fusefs_vops;
 extern struct pool fusefs_fbuf_pool;

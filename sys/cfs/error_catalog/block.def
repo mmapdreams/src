@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: ISC
+ *
+ * block.def -- canonical block-domain native status rows.
+ * Define CFS_ERROR_STATUS_OK and CFS_ERROR_STATUS_NEGATIVE before inclusion.
+ * Negative rows carry native value, POSIX presentation, and documentation.
+ */
+
+#ifndef CFS_ERROR_STATUS_OK
+#error "define CFS_ERROR_STATUS_OK before including block.def"
+#endif
+#ifndef CFS_ERROR_STATUS_NEGATIVE
+#error "define CFS_ERROR_STATUS_NEGATIVE before including block.def"
+#endif
+
+CFS_ERROR_STATUS_OK(CFS_BLK_OK, 0)
+CFS_ERROR_STATUS_NEGATIVE(CFS_BLK_EINVAL, -1, CFS_ERROR_POSIX(EINVAL),
+    "Invalid argument, zero-block request, or missing required hook.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BLK_ERANGE, -2, CFS_ERROR_POSIX(ERANGE),
+    "Transfer lies outside declared device geometry.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BLK_EIO, -3, CFS_ERROR_POSIX(EIO),
+    "Device failure or malformed transfer result.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_BLK_ESYNC, -4, CFS_ERROR_POSIX(EIO),
+    "Durability operation failed.")

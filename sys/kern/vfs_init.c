@@ -43,6 +43,7 @@
 #include <sys/namei.h>
 #include <sys/vnode.h>
 #include <sys/pool.h>
+#include <cfs/cfs_mount.h>
 
 struct pool namei_pool;
 
@@ -99,6 +100,11 @@ static struct vfsconf vfsconflist[] = {
 #ifdef TMPFS
 	{ &tmpfs_vfsops, MOUNT_TMPFS, 19, 0, MNT_LOCAL,
 	    sizeof(struct tmpfs_args) },
+#endif
+
+#ifdef CFS
+	{ &cfs_vfsops, MOUNT_CFS, 20, 0, MNT_LOCAL,
+	    sizeof(struct cfs_mount_args) },
 #endif
 };
 

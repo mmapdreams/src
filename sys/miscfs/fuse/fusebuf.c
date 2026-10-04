@@ -80,6 +80,7 @@ fb_setup(size_t len, ino_t ino, int op, struct proc *p)
 			fbuf->op_out_len = sizeof(struct fuse_entry_out);
 			break;
 		case FUSE_FSYNC:
+		case FUSE_FSYNCDIR:
 			fbuf->op_in_len = sizeof(struct fuse_fsync_in);
 			break;
 		case FUSE_RENAME:

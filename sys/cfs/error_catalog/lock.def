@@ -1,0 +1,19 @@
+/* SPDX-License-Identifier: ISC
+ *
+ * lock.def -- canonical lock-domain native status rows.
+ * Define CFS_ERROR_STATUS_OK and CFS_ERROR_STATUS_NEGATIVE before inclusion.
+ * Negative rows carry native value, POSIX presentation, and documentation.
+ */
+
+#ifndef CFS_ERROR_STATUS_OK
+#error "define CFS_ERROR_STATUS_OK before including lock.def"
+#endif
+#ifndef CFS_ERROR_STATUS_NEGATIVE
+#error "define CFS_ERROR_STATUS_NEGATIVE before including lock.def"
+#endif
+
+CFS_ERROR_STATUS_OK(CFS_LOCK_OK, 0)
+CFS_ERROR_STATUS_NEGATIVE(CFS_LOCK_EINVAL, -1, CFS_ERROR_POSIX(EINVAL),
+    "Lock seam or selected callback is missing.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_LOCK_EIO, -2, CFS_ERROR_POSIX(EIO),
+    "Lock provider operation failed or returned an undeclared result.")

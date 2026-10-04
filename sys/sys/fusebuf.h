@@ -83,6 +83,7 @@
 #define FUSE_OPENDIR	27
 #define FUSE_READDIR	28
 #define FUSE_RELEASEDIR	29
+#define FUSE_FSYNCDIR	30
 #define FUSE_DESTROY	38
 #define FUSE_FORGET	2
 

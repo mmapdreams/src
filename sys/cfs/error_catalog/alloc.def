@@ -1,0 +1,24 @@
+/* SPDX-License-Identifier: ISC
+ *
+ * alloc.def -- canonical host-allocation-domain native status rows.
+ * Define CFS_ERROR_STATUS_OK and CFS_ERROR_STATUS_NEGATIVE before inclusion.
+ * Negative rows carry native value, POSIX presentation, and documentation.
+ */
+
+#ifndef CFS_ERROR_STATUS_OK
+#error "define CFS_ERROR_STATUS_OK before including alloc.def"
+#endif
+#ifndef CFS_ERROR_STATUS_NEGATIVE
+#error "define CFS_ERROR_STATUS_NEGATIVE before including alloc.def"
+#endif
+
+CFS_ERROR_STATUS_OK(CFS_ALLOC_OK, 0)
+CFS_ERROR_STATUS_NEGATIVE(CFS_ALLOC_EINVAL, -1, CFS_ERROR_POSIX(EINVAL),
+    "Host-allocation request is invalid.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_ALLOC_EOVERFLOW, -2,
+    CFS_ERROR_POSIX(EOVERFLOW),
+    "Host-allocation size arithmetic overflowed.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_ALLOC_ENOMEM, -3, CFS_ERROR_POSIX(ENOMEM),
+    "Host memory is unavailable.")
+CFS_ERROR_STATUS_NEGATIVE(CFS_ALLOC_EPROVIDER, -4, CFS_ERROR_POSIX(EPROTO),
+    "Allocator violated its callback/result protocol.")

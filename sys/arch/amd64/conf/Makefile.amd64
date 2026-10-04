@@ -76,6 +76,7 @@ INCLUDES=	-nostdinc -I$S -I${.OBJDIR} -I$S/arch \
 		-I$S/dev/pci/drm/amd/display/dmub/inc \
 		-I$S/dev/pci/drm/i915
 CPPFLAGS=	${INCLUDES} ${IDENT} ${PARAM} -D_KERNEL -MD -MP
+CPPFLAGS+=	-I$S/cfs/include
 CWARNFLAGS=	-Werror -Wall -Wimplicit-function-declaration \
 		-Wno-pointer-sign \
 		-Wframe-larger-than=2047

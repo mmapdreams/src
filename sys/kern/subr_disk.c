@@ -1306,6 +1306,14 @@ dk_mountroot(void)
 
 	if (DL_GETPSIZE(&dl->d_partitions[part]) == 0)
 		panic("root filesystem has size 0");
+#ifdef CFS_ROOT
+	{
+		extern int cfs_mountroot(void);
+
+		free(dl, M_DEVBUF, sizeof(*dl));
+		return (cfs_mountroot());
+	}
+#endif
 	switch (dl->d_partitions[part].p_fstype) {
 #ifdef EXT2FS
 	case FS_EXT2FS:
