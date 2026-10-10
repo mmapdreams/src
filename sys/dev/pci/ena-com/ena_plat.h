@@ -199,9 +199,16 @@ PTR_ERR(const void *ptr)
 
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 
-/* Sleep / delay.  DELAY() is a busy-wait safe at any IPL. */
-#define ENA_MSLEEP(x)	delay((x) * 1000)
-#define ENA_USLEEP(x)	delay(x)
+/*
+ * Sleep / delay.  ENA_UDELAY() is a busy-wait safe at any IPL; the HAL uses
+ * it for the microsecond register-read poll.  ENA_MSLEEP() and ENA_USLEEP()
+ * are the waits in the admin command, device reset and abort polls, which
+ * run in process context (attach, ioctl under the net lock, the reset task),
+ * so they yield the CPU through ena_sleep_us() instead of spinning for the
+ * device's timeout -- seconds per admin command -- with the kernel lock held.
+ */
+#define ENA_MSLEEP(x)	ena_sleep_us((x) * 1000)
+#define ENA_USLEEP(x)	ena_sleep_us(x)
 #define ENA_UDELAY(x)	delay(x)
 #define ENA_MIGHT_SLEEP()
 
@@ -315,6 +322,7 @@ int	ena_dma_alloc(void *dmadev, bus_size_t size, ena_mem_handle_t *dma,
 	    int mapflags, bus_size_t alignment, int domain);
 void	ena_dma_free(void *dmadev, bus_size_t size, ena_mem_handle_t *dma);
 void	ena_rss_key_fill(void *key, size_t size);
+void	ena_sleep_us(unsigned int us);
 
 static inline uint32_t
 ena_reg_read32(struct ena_bus *bus, bus_size_t offset)

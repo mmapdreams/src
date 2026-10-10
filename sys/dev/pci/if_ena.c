@@ -116,6 +116,26 @@ ena_dev_name(void *arg)
 	return (ENA_DEVNAME(sc));
 }
 
+/*
+ * ENA_MSLEEP()/ENA_USLEEP(): yield between polls of the device.  The admin
+ * command, device reset and abort polls run in process context -- attach,
+ * ioctl under the net lock, and the reset task -- where a busy delay() would
+ * hold the CPU, and from the reset taskq the kernel lock, for up to the
+ * device's command timeout (3s by default) per poll.  tsleep_nsec() returns
+ * at once during autoconfiguration and after a panic, which would turn those
+ * timeouts into tight spins, so delay() stays for them.  Sub-millisecond
+ * waits stay busy too: the backoff starts at 100us to catch a prompt
+ * completion, and a tick is far coarser than that.
+ */
+void
+ena_sleep_us(unsigned int us)
+{
+	if (cold || panicstr || us < 1000)
+		delay(us);
+	else
+		tsleep_nsec(&nowake, PWAIT, "enaslp", USEC_TO_NSEC(us));
+}
+
 /* autoconf */
 int	ena_match(struct device *, void *, void *);
 void	ena_attach(struct device *, struct device *, void *);
@@ -417,7 +437,14 @@ ena_attach(struct device *parent, struct device *self, void *aux)
 	ena_com_admin_aenq_enable(ena_dev);
 
 	timeout_set(&sc->sc_tick, ena_tick, sc);
-	sc->sc_reset_tq = taskq_create(ENA_DEVNAME(sc), 1, IPL_NET, 0);
+	/*
+	 * Recovery takes the net lock itself and touches nothing that needs
+	 * the kernel lock; ena_init() already runs without it from the MPSAFE
+	 * ioctl path.  Holding it across a recovery that sleeps on the device
+	 * would stall every kernel-locked thread for the duration.
+	 */
+	sc->sc_reset_tq = taskq_create(ENA_DEVNAME(sc), 1, IPL_NET,
+	    TASKQ_MPSAFE);
 	if (sc->sc_reset_tq != NULL)
 		task_set(&sc->sc_reset_task, ena_reset_task, sc);
 	task_set(&sc->sc_link_task, ena_link_task, sc);
@@ -2227,6 +2254,13 @@ ena_reset_task(void *arg)
 			if_link_state_change(ifp);
 			printf("%s: device recovery failed: %d\n",
 			    ENA_DEVNAME(sc), error);
+		} else {
+			/*
+			 * Every trigger announces itself with ", resetting";
+			 * without this the log cannot tell a recovery that
+			 * finished from one still in progress.
+			 */
+			printf("%s: device reset complete\n", ENA_DEVNAME(sc));
 		}
 	}
 	splx(s);

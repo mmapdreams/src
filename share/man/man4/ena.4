@@ -50,6 +50,17 @@ with the device at attach time.
 .It "ena%d: keep-alive watchdog timeout, resetting"
 The device stopped sending keep-alive notifications.
 The driver resets the device and rebuilds its administration and I/O queues.
+.It "ena%d: TX queue %u stalled for %us, resetting"
+Descriptors were posted to a transmit queue but no completion arrived
+for several seconds.
+The driver resets the device as above.
+.It "ena%d: RX queue %u completion for empty slot %u, resetting"
+The device completed a receive slot the driver had already consumed,
+so the ring's accounting can no longer be trusted.
+The driver resets the device as above.
+.It "ena%d: device reset complete"
+A reset announced by one of the messages above finished and the
+interface is passing traffic again.
 .It "ena%d: device recovery failed: %d"
 The device could not be reset or its queues could not be restored.
 The interface remains down.
