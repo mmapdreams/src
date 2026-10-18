@@ -225,6 +225,7 @@ struct ena_softc {
 
 	/* AENQ-driven liveness + link state. */
 	uint64_t		 sc_keep_alive_ts;	/* nsec uptime */
+	uint64_t		 sc_keep_alive_timeout;	/* nsec, 0 = disabled */
 	int			 sc_link_state;
 	int			 sc_link_pending;
 	struct task		 sc_link_task;
