@@ -748,6 +748,7 @@ ena_admin_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 {
 	struct ena_com_dev *ena_dev = sc->sc_ena_dev;
 	uint32_t aenq_groups;
+	uint16_t hint;
 	int rc, dma_width;
 
 	rc = ena_com_validate_version(ena_dev);
@@ -778,6 +779,16 @@ ena_admin_init(struct ena_softc *sc, struct ena_com_dev_get_features_ctx *feat)
 	rc = ena_com_set_aenq_config(ena_dev, aenq_groups);
 	if (rc != 0)
 		return (rc);
+
+	/* Arm keep-alive only if negotiated; a 0 hint means driver default. */
+	sc->sc_keep_alive_timeout = 0;
+	hint = feat->hw_hints.driver_watchdog_timeout;
+	if (aenq_groups & BIT(ENA_ADMIN_KEEP_ALIVE)) {
+		if (hint == 0)
+			sc->sc_keep_alive_timeout = SEC_TO_NSEC(6);
+		else if (hint != ENA_HW_HINTS_NO_TIMEOUT)
+			sc->sc_keep_alive_timeout = MSEC_TO_NSEC(hint);
+	}
 
 	ena_config_llq(sc, feat);
 
@@ -2178,10 +2189,10 @@ ena_tick(void *arg)
 	if (!sc->sc_up)
 		return;
 
-	/* Device promises a keep-alive AENQ every second; allow 6s slack. */
+	/* Keep-alive deadline from ena_admin_init; 0 disables it. */
 	now = getnsecuptime();
-	timeout = sc->sc_keep_alive_ts + SEC_TO_NSEC(6);
-	if ((int64_t)(now - timeout) > 0) {
+	timeout = sc->sc_keep_alive_ts + sc->sc_keep_alive_timeout;
+	if (sc->sc_keep_alive_timeout != 0 && (int64_t)(now - timeout) > 0) {
 		printf("%s: keep-alive watchdog timeout, resetting\n",
 		    ENA_DEVNAME(sc));
 		if (sc->sc_reset_tq != NULL)

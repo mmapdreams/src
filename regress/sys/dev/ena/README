@@ -20,3 +20,17 @@ The failure the model reproduces is a keep-alive watchdog timeout whose
 DESTROY_SQ then times out, after which CREATE_CQ returns ENODEV and the
 interface stays down until the host reboots.  The model emulates no DMA,
 MMIO or MSI-X; it needs no ENA hardware.
+
+ENA keep-alive watchdog regression
+
+watchdog.sh compiles ena_admin_init() and ena_tick() from the driver
+against a model with configurable device features and a fake clock.  It
+checks keep-alive negotiation, default and device-supplied deadlines,
+deadline boundaries, disabled keep-alive monitoring, and renegotiation
+after reset.  The TX-progress watchdog must still detect stalled queues
+when keep-alive monitoring is disabled.
+
+	sh regress/sys/dev/ena/watchdog.sh sys/dev/pci/if_ena.c
+
+The model tests watchdog policy, not DMA, interrupt delivery or hardware
+reset ordering.
