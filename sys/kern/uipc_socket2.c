@@ -488,11 +488,24 @@ sosleep_nsec(struct socket *so, void *ident, int prio, const char *wmesg,
 	switch (so->so_proto->pr_domain->dom_family) {
 	case PF_INET:
 	case PF_INET6:
-		if (rw_status(&netlock) == RW_READ)
+		if (rw_status(&netlock) == RW_READ) {
+			/*
+			 * Protocol input may run with the shared net lock
+			 * and the socket lock.  Get on the sleep queue
+			 * before releasing the socket lock, so that a
+			 * wakeup between the caller's check and the sleep
+			 * is not lost.
+			 */
+			KASSERT((prio & ~(PRIMASK | PCATCH)) == 0);
+			sleep_setup(ident, prio, wmesg);
 			rw_exit_write(&so->so_lock);
-		ret = rwsleep_nsec(ident, &netlock, prio, wmesg, nsecs);
-		if (rw_status(&netlock) == RW_READ)
+			NET_UNLOCK_SHARED();
+			ret = sleep_finish(nsecs, 1);
+			NET_LOCK_SHARED();
 			rw_enter_write(&so->so_lock);
+		} else
+			ret = rwsleep_nsec(ident, &netlock, prio, wmesg,
+			    nsecs);
 		break;
 	default:
 		ret = rwsleep_nsec(ident, &so->so_lock, prio, wmesg, nsecs);
