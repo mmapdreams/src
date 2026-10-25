@@ -1,4 +1,4 @@
-/*	$OpenBSD: qwzvar.h,v 1.25 2026/09/30 18:50:36 kirill Exp $	*/
+/*	$OpenBSD: qwzvar.h,v 1.29 2026/10/01 17:37:59 kirill Exp $	*/
 
 /*
  * Copyright (c) 2018-2019 The Linux Foundation.
@@ -289,9 +289,9 @@ struct hal_rx_ops {
 	uint16_t (*rx_desc_get_msdu_len)(struct hal_rx_desc *desc);
 #ifdef notyet
 	uint8_t (*rx_desc_get_msdu_sgi)(struct hal_rx_desc *desc);
-	uint8_t (*rx_desc_get_msdu_rate_mcs)(struct hal_rx_desc *desc);
 	uint8_t (*rx_desc_get_msdu_rx_bw)(struct hal_rx_desc *desc);
 #endif
+	uint8_t (*rx_desc_get_msdu_rate_mcs)(struct hal_rx_desc *desc);
 	uint32_t (*rx_desc_get_msdu_freq)(struct hal_rx_desc *desc);
 	uint8_t (*rx_desc_get_msdu_pkt_type)(struct hal_rx_desc *desc);
 	uint8_t (*rx_desc_get_msdu_nss)(struct hal_rx_desc *desc);
@@ -1146,18 +1146,23 @@ struct dp_rx_tid {
 #endif
 };
 
-#define DP_REO_DESC_FREE_THRESHOLD  64
-#define DP_REO_DESC_FREE_TIMEOUT_MS 1000
 #define DP_MON_PURGE_TIMEOUT_MS     100
 #define DP_MON_SERVICE_BUDGET       128
 
-struct dp_reo_cache_flush_elem {
-	TAILQ_ENTRY(dp_reo_cache_flush_elem) entry;
-	struct dp_rx_tid data;
-	uint64_t ts;
+enum qwz_rx_tid_retire_state {
+	QWZ_RX_TID_REUSABLE,
+	QWZ_RX_TID_DELETE_READY,
+	QWZ_RX_TID_DELETE_PENDING,
+	QWZ_RX_TID_FLUSH_READY,
+	QWZ_RX_TID_FLUSH_PENDING,
+	QWZ_RX_TID_RETIRE_FAILED,
 };
 
-TAILQ_HEAD(dp_reo_cmd_cache_flush_head, dp_reo_cache_flush_elem);
+struct qwz_rx_tid_retire {
+	struct dp_rx_tid data;
+	enum qwz_rx_tid_retire_state state;
+	uint32_t flush_offset;
+};
 
 struct dp_reo_cmd {
 	TAILQ_ENTRY(dp_reo_cmd) entry;
@@ -1257,18 +1262,14 @@ struct qwz_dp {
 	struct dp_tx_ring tx_ring[DP_TCL_NUM_RING_MAX];
 	struct hal_wbm_idle_scatter_list scatter_list[DP_IDLE_SCATTER_BUFS_MAX];
 	struct dp_reo_cmd_head reo_cmd_list;
-	struct dp_reo_cmd_cache_flush_head reo_cmd_cache_flush_list;
 #if 0
 	struct list_head dp_full_mon_mpdu_list;
 #endif
-	uint32_t reo_cmd_cache_flush_count;
 	enum hal_rx_buf_return_buf_manager idle_link_rbm;
 #if 0
 	/**
 	 * protects access to below fields,
 	 * - reo_cmd_list
-	 * - reo_cmd_cache_flush_list
-	 * - reo_cmd_cache_flush_count
 	 */
 	spinlock_t reo_cmd_lock;
 #endif
@@ -1302,6 +1303,7 @@ struct qwz_dp {
 	 * support for HostAP mode gets added to the driver.
 	 */
 	struct qwz_dmamem *rx_tid_mem[HAL_DESC_REO_NON_QOS_TID + 1];
+	struct qwz_rx_tid_retire rx_tid_retire[HAL_DESC_REO_NON_QOS_TID + 1];
 };
 
 #define ATH12K_SHADOW_DP_TIMER_INTERVAL 20
@@ -1644,6 +1646,8 @@ struct hal_rx_wbm_rel_info {
 	uint32_t err_code;
 	int first_msdu;
 	int last_msdu;
+	int continuation;
+	uint16_t peer_id;
 };
 
 #define HAL_INVALID_PEERID 0xffff
@@ -1887,15 +1891,31 @@ struct qwz_ext_irq_grp {
 
 struct qwz_rx_radiotap_header {
 	struct ieee80211_radiotap_header wr_ihdr;
+	uint8_t		wr_flags;
+	uint8_t		wr_rate;
+	uint16_t	wr_chan_freq;
+	uint16_t	wr_chan_flags;
+	int8_t		wr_dbm_antsignal;
 } __packed;
 
-#define IWX_RX_RADIOTAP_PRESENT	0 /* TODO add more information */
+#define QWZ_RX_RADIOTAP_PRESENT						\
+	((1 << IEEE80211_RADIOTAP_FLAGS) |				\
+	 (1 << IEEE80211_RADIOTAP_RATE) |				\
+	 (1 << IEEE80211_RADIOTAP_CHANNEL) |				\
+	 (1 << IEEE80211_RADIOTAP_DBM_ANTSIGNAL))
 
 struct qwz_tx_radiotap_header {
 	struct ieee80211_radiotap_header wt_ihdr;
+	uint8_t		wt_flags;
+	uint8_t		wt_rate;
+	uint16_t	wt_chan_freq;
+	uint16_t	wt_chan_flags;
 } __packed;
 
-#define IWX_TX_RADIOTAP_PRESENT	0 /* TODO add more information */
+#define QWZ_TX_RADIOTAP_PRESENT						\
+	((1 << IEEE80211_RADIOTAP_FLAGS) |				\
+	 (1 << IEEE80211_RADIOTAP_RATE) |				\
+	 (1 << IEEE80211_RADIOTAP_CHANNEL))
 
 struct qwz_setkey_task_arg {
 	struct ieee80211_node *ni;

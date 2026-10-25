@@ -1,4 +1,4 @@
-/*	$OpenBSD: qwz.c,v 1.74 2026/09/30 18:51:26 kirill Exp $	*/
+/*	$OpenBSD: qwz.c,v 1.91 2026/10/02 12:41:35 kirill Exp $	*/
 
 /*
  * Copyright 2023 Stefan Sperling <stsp@openbsd.org>
@@ -105,6 +105,17 @@
 	const __typeof( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
 
+#if NBPFILTER > 0
+static inline uint8_t
+hweight8(uint8_t x)
+{
+	x = (x & 0x55) + ((x & 0xaa) >> 1);
+	x = (x & 0x33) + ((x & 0xcc) >> 2);
+	x = (x + (x >> 4)) & 0x0f;
+	return (x);
+}
+#endif
+
 /* #define QWZ_DEBUG */
 
 #include <dev/ic/qwzreg.h>
@@ -154,8 +165,11 @@ int qwz_dp_tx_send_reo_cmd(struct qwz_softc *, struct dp_rx_tid *,
     enum hal_reo_cmd_type , struct ath12k_hal_reo_cmd *,
     void (*func)(struct qwz_dp *, void *, enum hal_reo_cmd_status));
 void qwz_dp_rx_deliver_msdu(struct qwz_softc *, struct qwz_rx_msdu *);
+int qwz_dp_rx_h_null_q_desc(struct qwz_softc *, struct qwz_rx_msdu *,
+    struct qwz_rx_msdu_list *);
 void qwz_dp_service_mon_ring(void *);
 void qwz_peer_frags_flush(struct qwz_softc *, struct ath12k_peer *);
+int qwz_peer_rx_tid_cleanup(struct qwz_softc *, struct ath12k_peer *);
 int qwz_wmi_vdev_install_key(struct qwz_softc *,
     struct wmi_vdev_install_key_arg *, uint8_t);
 int qwz_dp_peer_rx_pn_replay_config(struct qwz_softc *, struct qwz_vif *,
@@ -167,6 +181,7 @@ int qwz_scan(struct qwz_softc *);
 void qwz_scan_abort(struct qwz_softc *);
 int qwz_auth(struct qwz_softc *);
 int qwz_deauth(struct qwz_softc *);
+int qwz_assoc(struct qwz_softc *);
 int qwz_run(struct qwz_softc *);
 int qwz_run_stop(struct qwz_softc *);
 
@@ -237,6 +252,7 @@ qwz_init(struct ifnet *ifp)
 			refcnt_init(&sc->task_refs);
 			ifq_clr_oactive(&ifp->if_snd);
 			ifp->if_flags |= IFF_RUNNING;
+			sc->ops.irq_enable(sc);
 			ieee80211_begin_scan(ifp);
 		}
 		splx(s);
@@ -344,6 +360,7 @@ qwz_init(struct ifnet *ifp)
 		ifq_clr_oactive(&ifp->if_snd);
 		ifp->if_flags |= IFF_RUNNING;
 
+		sc->ops.irq_enable(sc);
 		ieee80211_begin_scan(ifp);
 	}
 
@@ -513,6 +530,33 @@ qwz_tx(struct qwz_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
 		struct qwz_tx_radiotap_header *tap = &sc->sc_txtap;
+		struct ieee80211com *ic = &sc->sc_ic;
+		uint16_t chan_flags;
+
+		tap->wt_flags = 0;
+		tap->wt_chan_freq = htole16(ni->ni_chan->ic_freq);
+		chan_flags = ni->ni_chan->ic_flags;
+		if (ic->ic_curmode != IEEE80211_MODE_11N &&
+		    ic->ic_curmode != IEEE80211_MODE_11AC) {
+			chan_flags &= ~IEEE80211_CHAN_HT;
+			chan_flags &= ~IEEE80211_CHAN_40MHZ;
+		}
+		if (ic->ic_curmode != IEEE80211_MODE_11AC)
+			chan_flags &= ~IEEE80211_CHAN_VHT;
+		tap->wt_chan_flags = htole16(chan_flags);
+		if ((ni->ni_flags & IEEE80211_NODE_HT) &&
+		    !IEEE80211_IS_MULTICAST(wh->i_addr1) &&
+		    frame_type == IEEE80211_FC0_TYPE_DATA) {
+			tap->wt_rate = (0x80 | ni->ni_txmcs);
+		} else {
+			struct ieee80211_rateset *rs = &ni->ni_rates;
+			uint8_t rate = rs->rs_rates[ni->ni_txrate];
+
+			tap->wt_rate = rate & IEEE80211_RATE_VAL;
+		}
+		if ((ic->ic_flags & IEEE80211_F_WEPON) &&
+		    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED))
+			tap->wt_flags |= IEEE80211_RADIOTAP_F_WEP;
 
 		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_txtap_len,
 		    m, BPF_DIRECTION_OUT);
@@ -1072,6 +1116,7 @@ next_scan:
 		break;
 
 	case IEEE80211_S_ASSOC:
+		err = qwz_assoc(sc);
 		break;
 
 	case IEEE80211_S_RUN:
@@ -1804,9 +1849,9 @@ const struct hal_rx_ops hal_rx_wcn7850_ops = {
 	.rx_desc_get_msdu_len = qwz_hw_wcn7850_rx_desc_get_msdu_len,
 #ifdef notyet
 	.rx_desc_get_msdu_sgi = qwz_hw_wcn7850_rx_desc_get_msdu_sgi,
-	.rx_desc_get_msdu_rate_mcs = qwz_hw_wcn7850_rx_desc_get_msdu_rate_mcs,
 	.rx_desc_get_msdu_rx_bw = qwz_hw_wcn7850_rx_desc_get_msdu_rx_bw,
 #endif
+	.rx_desc_get_msdu_rate_mcs = qwz_hw_wcn7850_rx_desc_get_msdu_rate_mcs,
 	.rx_desc_get_msdu_freq = qwz_hw_wcn7850_rx_desc_get_msdu_freq,
 	.rx_desc_get_msdu_pkt_type = qwz_hw_wcn7850_rx_desc_get_msdu_pkt_type,
 	.rx_desc_get_msdu_nss = qwz_hw_wcn7850_rx_desc_get_msdu_nss,
@@ -7355,6 +7400,9 @@ qwz_hal_srng_access_begin(struct qwz_softc *sc, struct hal_srng *srng)
 		 */
 		srng->u.dst_ring.cached_hp =
 			*(volatile uint32_t *)srng->u.dst_ring.hp_addr;
+
+		bus_dmamap_sync(sc->sc_dmat, QWZ_DMA_MAP(sc->hal.rdpmem), 0,
+		    QWZ_DMA_LEN(sc->hal.rdpmem), BUS_DMASYNC_POSTREAD);
 	}
 }
 
@@ -7364,28 +7412,34 @@ qwz_hal_srng_access_end(struct qwz_softc *sc, struct hal_srng *srng)
 #ifdef notyet
 	lockdep_assert_held(&srng->lock);
 #endif
-	/* TODO: See if we need a write memory barrier here */
 	if (srng->flags & HAL_SRNG_FLAGS_LMAC_RING) {
 		/* For LMAC rings, ring pointer updates are done through FW and
 		 * hence written to a shared memory location that is read by FW
 		 */
 		if (srng->ring_dir == HAL_SRNG_DIR_SRC) {
+			bus_dmamap_sync(sc->sc_dmat, QWZ_DMA_MAP(sc->hal.wrpmem), 0,
+			    QWZ_DMA_LEN(sc->hal.wrpmem), BUS_DMASYNC_POSTWRITE);
+
 			srng->u.src_ring.last_tp =
 			    *(volatile uint32_t *)srng->u.src_ring.tp_addr;
 			*srng->u.src_ring.hp_addr = srng->u.src_ring.hp;
 		} else {
-			srng->u.dst_ring.last_hp = *srng->u.dst_ring.hp_addr;
+			srng->u.dst_ring.last_hp =
+			    *(volatile uint32_t *)srng->u.dst_ring.hp_addr;
 			*srng->u.dst_ring.tp_addr = srng->u.dst_ring.tp;
 		}
 	} else {
 		if (srng->ring_dir == HAL_SRNG_DIR_SRC) {
+			bus_dmamap_sync(sc->sc_dmat, QWZ_DMA_MAP(sc->hal.wrpmem), 0,
+			    QWZ_DMA_LEN(sc->hal.wrpmem), BUS_DMASYNC_POSTWRITE);
 			srng->u.src_ring.last_tp =
 			    *(volatile uint32_t *)srng->u.src_ring.tp_addr;
 			sc->ops.write32(sc,
 			    (unsigned long)srng->u.src_ring.hp_addr -
 			    (unsigned long)sc->mem, srng->u.src_ring.hp);
 		} else {
-			srng->u.dst_ring.last_hp = *srng->u.dst_ring.hp_addr;
+			srng->u.dst_ring.last_hp =
+			    *(volatile uint32_t *)srng->u.dst_ring.hp_addr;
 			sc->ops.write32(sc,
 			    (unsigned long)srng->u.dst_ring.tp_addr -
 			    (unsigned long)sc->mem, srng->u.dst_ring.tp);
@@ -7944,7 +7998,7 @@ void
 qwz_hal_reo_init_cmd_ring(struct qwz_softc *sc, struct hal_srng *srng)
 {
 	struct hal_srng_params params;
-	struct hal_tlv_hdr *tlv;
+	struct hal_tlv_64_hdr *tlv;
 	struct hal_reo_get_queue_stats *desc;
 	int i, cmd_num = 1;
 	int entry_size;
@@ -7957,39 +8011,44 @@ qwz_hal_reo_init_cmd_ring(struct qwz_softc *sc, struct hal_srng *srng)
 	entry = (uint8_t *)params.ring_base_vaddr;
 
 	for (i = 0; i < params.num_entries; i++) {
-		tlv = (struct hal_tlv_hdr *)entry;
+		tlv = (struct hal_tlv_64_hdr *)entry;
 		desc = (struct hal_reo_get_queue_stats *)tlv->value;
-		desc->cmd.info0 = FIELD_PREP(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER,
-		    cmd_num++);
+		desc->cmd.info0 = htole32(FIELD_PREP(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER,
+		    cmd_num++));
 		entry += entry_size;
 	}
 }
 
 int
-qwz_hal_reo_cmd_queue_stats(struct hal_tlv_hdr *tlv, struct ath12k_hal_reo_cmd *cmd)
+qwz_hal_reo_cmd_queue_stats(struct hal_tlv_64_hdr *tlv,
+    struct ath12k_hal_reo_cmd *cmd)
 {
 	struct hal_reo_get_queue_stats *desc;
 
-	tlv->tl = FIELD_PREP(HAL_TLV_HDR_TAG, HAL_REO_GET_QUEUE_STATS) |
-	    FIELD_PREP(HAL_TLV_HDR_LEN, sizeof(*desc));
+	tlv->tl = htole64(FIELD_PREP(HAL_TLV_HDR_TAG, HAL_REO_GET_QUEUE_STATS) |
+	    FIELD_PREP(HAL_TLV_HDR_LEN, sizeof(*desc)));
 
 	desc = (struct hal_reo_get_queue_stats *)tlv->value;
+	memset(&desc->queue_addr_lo, 0,
+	    sizeof(*desc) - offsetof(struct hal_reo_get_queue_stats, queue_addr_lo));
 
-	desc->cmd.info0 &= ~HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED;
+	desc->cmd.info0 &= ~htole32(HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED);
 	if (cmd->flag & HAL_REO_CMD_FLG_NEED_STATUS)
-		desc->cmd.info0 |= HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED;
+		desc->cmd.info0 |= htole32(HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED);
 
-	desc->queue_addr_lo = cmd->addr_lo;
+	desc->queue_addr_lo = htole32(cmd->addr_lo);
 	desc->info0 = FIELD_PREP(HAL_REO_GET_QUEUE_STATS_INFO0_QUEUE_ADDR_HI,
 	    cmd->addr_hi);
 	if (cmd->flag & HAL_REO_CMD_FLG_STATS_CLEAR)
 		desc->info0 |= HAL_REO_GET_QUEUE_STATS_INFO0_CLEAR_STATS;
 
-	return FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER, desc->cmd.info0);
+	desc->info0 = htole32(desc->info0);
+	return FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER,
+	    le32toh(desc->cmd.info0));
 }
 
 int
-qwz_hal_reo_cmd_flush_cache(struct ath12k_hal *hal, struct hal_tlv_hdr *tlv,
+qwz_hal_reo_cmd_flush_cache(struct ath12k_hal *hal, struct hal_tlv_64_hdr *tlv,
     struct ath12k_hal_reo_cmd *cmd)
 {
 	struct hal_reo_flush_cache *desc;
@@ -8002,16 +8061,18 @@ qwz_hal_reo_cmd_flush_cache(struct ath12k_hal *hal, struct hal_tlv_hdr *tlv,
 		hal->current_blk_index = avail_slot;
 	}
 
-	tlv->tl = FIELD_PREP(HAL_TLV_HDR_TAG, HAL_REO_FLUSH_CACHE) |
-	    FIELD_PREP(HAL_TLV_HDR_LEN, sizeof(*desc));
+	tlv->tl = htole64(FIELD_PREP(HAL_TLV_HDR_TAG, HAL_REO_FLUSH_CACHE) |
+	    FIELD_PREP(HAL_TLV_HDR_LEN, sizeof(*desc)));
 
 	desc = (struct hal_reo_flush_cache *)tlv->value;
+	memset(&desc->cache_addr_lo, 0,
+	    sizeof(*desc) - offsetof(struct hal_reo_flush_cache, cache_addr_lo));
 
-	desc->cmd.info0 &= ~HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED;
+	desc->cmd.info0 &= ~htole32(HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED);
 	if (cmd->flag & HAL_REO_CMD_FLG_NEED_STATUS)
-		desc->cmd.info0 |= HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED;
+		desc->cmd.info0 |= htole32(HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED);
 
-	desc->cache_addr_lo = cmd->addr_lo;
+	desc->cache_addr_lo = htole32(cmd->addr_lo);
 	desc->info0 = FIELD_PREP(HAL_REO_FLUSH_CACHE_INFO0_CACHE_ADDR_HI,
 	    cmd->addr_hi);
 
@@ -8031,25 +8092,29 @@ qwz_hal_reo_cmd_flush_cache(struct ath12k_hal *hal, struct hal_tlv_hdr *tlv,
 	if (cmd->flag & HAL_REO_CMD_FLG_FLUSH_ALL)
 		desc->info0 |= HAL_REO_FLUSH_CACHE_INFO0_FLUSH_ALL;
 
-	return FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER, desc->cmd.info0);
+	desc->info0 = htole32(desc->info0);
+	return FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER,
+	    le32toh(desc->cmd.info0));
 }
 
 int
-qwz_hal_reo_cmd_update_rx_queue(struct hal_tlv_hdr *tlv,
+qwz_hal_reo_cmd_update_rx_queue(struct hal_tlv_64_hdr *tlv,
     struct ath12k_hal_reo_cmd *cmd)
 {
 	struct hal_reo_update_rx_queue *desc;
 
-	tlv->tl = FIELD_PREP(HAL_TLV_HDR_TAG, HAL_REO_UPDATE_RX_REO_QUEUE) |
-	    FIELD_PREP(HAL_TLV_HDR_LEN, sizeof(*desc));
+	tlv->tl = htole64(FIELD_PREP(HAL_TLV_HDR_TAG, HAL_REO_UPDATE_RX_REO_QUEUE) |
+	    FIELD_PREP(HAL_TLV_HDR_LEN, sizeof(*desc)));
 
 	desc = (struct hal_reo_update_rx_queue *)tlv->value;
+	memset(&desc->queue_addr_lo, 0,
+	    sizeof(*desc) - offsetof(struct hal_reo_update_rx_queue, queue_addr_lo));
 
-	desc->cmd.info0 &= ~HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED;
+	desc->cmd.info0 &= ~htole32(HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED);
 	if (cmd->flag & HAL_REO_CMD_FLG_NEED_STATUS)
-		desc->cmd.info0 |= HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED;
+		desc->cmd.info0 |= htole32(HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED);
 
-	desc->queue_addr_lo = cmd->addr_lo;
+	desc->queue_addr_lo = htole32(cmd->addr_lo);
 	desc->info0 =
 		FIELD_PREP(HAL_REO_UPD_RX_QUEUE_INFO0_QUEUE_ADDR_HI,
 		    cmd->addr_hi) |
@@ -8155,20 +8220,30 @@ qwz_hal_reo_cmd_update_rx_queue(struct hal_tlv_hdr *tlv,
 	    FIELD_PREP(HAL_REO_UPD_RX_QUEUE_INFO2_PN_ERR,
 	        !!(cmd->upd2 & HAL_REO_CMD_UPD2_PN_ERR));
 
-	return FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER, desc->cmd.info0);
+	desc->info0 = htole32(desc->info0);
+	desc->info1 = htole32(desc->info1);
+	desc->info2 = htole32(desc->info2);
+	return FIELD_GET(HAL_REO_CMD_HDR_INFO0_CMD_NUMBER,
+	    le32toh(desc->cmd.info0));
 }
 
 int
 qwz_hal_reo_cmd_send(struct qwz_softc *sc, struct hal_srng *srng,
-    enum hal_reo_cmd_type type, struct ath12k_hal_reo_cmd *cmd)
+    enum hal_reo_cmd_type type, struct ath12k_hal_reo_cmd *cmd,
+    struct dp_reo_cmd *dp_cmd)
 {
-	struct hal_tlv_hdr *reo_desc;
+	struct hal_tlv_64_hdr *reo_desc;
+	struct dp_reo_cmd *pending;
+	uint32_t hp, reap_hp;
 	int ret;
 #ifdef notyet
 	spin_lock_bh(&srng->lock);
 #endif
 	qwz_hal_srng_access_begin(sc, srng);
-	reo_desc = (struct hal_tlv_hdr *)qwz_hal_srng_src_get_next_entry(sc, srng);
+	hp = srng->u.src_ring.hp;
+	reap_hp = srng->u.src_ring.reap_hp;
+	reo_desc = (struct hal_tlv_64_hdr *)
+	    qwz_hal_srng_src_get_next_entry(sc, srng);
 	if (!reo_desc) {
 		ret = ENOBUFS;
 		goto out;
@@ -8198,6 +8273,26 @@ qwz_hal_reo_cmd_send(struct qwz_softc *sc, struct hal_srng *srng,
 		break;
 	}
 
+	if (ret <= 0) {
+		if (ret == 0)
+			ret = EINVAL;
+		goto rollback;
+	}
+	TAILQ_FOREACH(pending, &sc->dp.reo_cmd_list, entry) {
+		if (pending->cmd_num == ret) {
+			ret = EBUSY;
+			goto rollback;
+		}
+	}
+	if (dp_cmd != NULL) {
+		dp_cmd->cmd_num = ret;
+		TAILQ_INSERT_TAIL(&sc->dp.reo_cmd_list, dp_cmd, entry);
+	}
+	goto out;
+
+rollback:
+	srng->u.src_ring.hp = hp;
+	srng->u.src_ring.reap_hp = reap_hp;
 out:
 	qwz_hal_srng_access_end(sc, srng);
 #ifdef notyet
@@ -8485,6 +8580,32 @@ qwz_dp_get_rx_desc(struct qwz_softc *sc, uint32_t cookie)
 
 	desc_addr_ptr = ath12k_dp_cc_get_desc_addr_ptr(sc, ppt_idx, spt_idx);
 	return *desc_addr_ptr;
+}
+
+struct qwz_rx_msdu *
+qwz_dp_rx_reap_desc(struct qwz_softc *sc, uint32_t cookie, void *list)
+{
+	TAILQ_HEAD(, ath12k_rx_desc_info) *used_list = list;
+	struct ath12k_rx_desc_info *desc_info;
+	struct qwz_rx_msdu *msdu;
+
+	desc_info = qwz_dp_get_rx_desc(sc, cookie);
+	if (desc_info == NULL || desc_info->magic != ATH12K_DP_RX_DESC_MAGIC ||
+	    !desc_info->in_use || desc_info->m == NULL)
+		return NULL;
+
+	bus_dmamap_sync(sc->sc_dmat, desc_info->map, 0,
+	    desc_info->map->dm_mapsize, BUS_DMASYNC_POSTREAD);
+	bus_dmamap_unload(sc->sc_dmat, desc_info->map);
+
+	msdu = &desc_info->rx_msdu;
+	memset(msdu, 0, sizeof(*msdu));
+	msdu->m = desc_info->m;
+	msdu->rx_desc = mtod(msdu->m, struct hal_rx_desc *);
+	desc_info->m = NULL;
+	desc_info->in_use = 0;
+	TAILQ_INSERT_TAIL(used_list, desc_info, entry);
+	return msdu;
 }
 
 int
@@ -8892,13 +9013,11 @@ qwz_dp_alloc(struct qwz_softc *sc)
 	dp->sc = sc;
 
 	TAILQ_INIT(&dp->reo_cmd_list);
-	TAILQ_INIT(&dp->reo_cmd_cache_flush_list);
 #if 0
 	INIT_LIST_HEAD(&dp->dp_full_mon_mpdu_list);
 	spin_lock_init(&dp->reo_cmd_lock);
 #endif
 
-	dp->reo_cmd_cache_flush_count = 0;
 	dp->idle_link_rbm = qwz_dp_get_idle_link_rbm(sc);
 
 	ret = qwz_wbm_idle_ring_setup(sc, &n_link_desc);
@@ -9006,7 +9125,6 @@ qwz_dp_reo_cmd_list_cleanup(struct qwz_softc *sc)
 {
 	struct qwz_dp *dp = &sc->dp;
 	struct dp_reo_cmd *cmd, *tmp;
-	struct dp_reo_cache_flush_elem *cmd_cache, *tmp_cache;
 	struct dp_rx_tid *rx_tid;
 #ifdef notyet
 	spin_lock_bh(&dp->reo_cmd_lock);
@@ -9016,15 +9134,6 @@ qwz_dp_reo_cmd_list_cleanup(struct qwz_softc *sc)
 		rx_tid = &cmd->data;
 		qwz_dp_rx_tid_clear(sc, rx_tid);
 		free(cmd, M_DEVBUF, sizeof(*cmd));
-	}
-
-	TAILQ_FOREACH_SAFE(cmd_cache, &dp->reo_cmd_cache_flush_list,
-	    entry, tmp_cache) {
-		TAILQ_REMOVE(&dp->reo_cmd_cache_flush_list, cmd_cache, entry);
-		dp->reo_cmd_cache_flush_count--;
-		rx_tid = &cmd_cache->data;
-		qwz_dp_rx_tid_clear(sc, rx_tid);
-		free(cmd_cache, M_DEVBUF, sizeof(*cmd_cache));
 	}
 #ifdef notyet
 	spin_unlock_bh(&dp->reo_cmd_lock);
@@ -9066,6 +9175,8 @@ qwz_dp_free(struct qwz_softc *sc)
 			dp->rx_tid_mem[i] = NULL;
 		}
 	}
+
+	memset(dp->rx_tid_retire, 0, sizeof(dp->rx_tid_retire));
 
 	/* Deinit any SOC level resource */
 }
@@ -11815,6 +11926,23 @@ qwz_mgmt_rx_event(struct qwz_softc *sc, struct mbuf *m)
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
 		struct qwz_rx_radiotap_header *tap = &sc->sc_rxtap;
+		uint16_t chan_flags;
+		uint32_t freq;
+
+		tap->wr_ihdr.it_present = htole32(QWZ_RX_RADIOTAP_PRESENT);
+		tap->wr_flags = 0;
+		freq = rx_ev.chan_freq;
+		tap->wr_chan_freq = htole16(freq);
+		chan_flags = ic->ic_channels[rx_ev.channel & 0xff].ic_flags;
+		if (ic->ic_curmode != IEEE80211_MODE_11N &&
+		    ic->ic_curmode != IEEE80211_MODE_11AC) {
+			chan_flags &= ~IEEE80211_CHAN_HT;
+			chan_flags &= ~IEEE80211_CHAN_VHT;
+			chan_flags &= ~IEEE80211_CHAN_40MHZ;
+		}
+		tap->wr_rate = rx_ev.rate / 500;
+		tap->wr_chan_flags = htole16(chan_flags);
+		tap->wr_dbm_antsignal = rxi.rxi_rssi;
 
 		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_rxtap_len,
 		    m, BPF_DIRECTION_IN);
@@ -14406,7 +14534,7 @@ qwz_mac_hw_ratecode_to_legacy_rate(struct ieee80211_node *ni, uint8_t hw_rc,
 				*rate = 96;
 				break;
 			case ATH12K_HW_RATE_OFDM_54M:
-				*rate = 104;
+				*rate = 108;
 				break;
 			default:
 				return EINVAL;
@@ -14461,6 +14589,16 @@ qwz_dp_tx_complete_msdu(struct qwz_softc *sc, struct dp_tx_ring *tx_ring,
 			tx_data->ni->ni_txrate = rateidx;
 	} else if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11N)
 		tx_data->ni->ni_txmcs = mcs;
+
+	if (ts->status == HAL_WBM_TQM_REL_REASON_FRAME_ACKED &&
+	    ts->ack_rssi != 0) {
+		int8_t rssi_dbm = (int8_t)ts->ack_rssi;
+
+		if (!isset(sc->wmi.svc_map,
+		    WMI_TLV_SERVICE_HW_DB2DBM_CONVERSION_SUPPORT))
+			rssi_dbm += ATH12K_DEFAULT_NOISE_FLOOR;
+		tx_data->ni->ni_rssi = rssi_dbm;
+	}
 
 	ieee80211_release_node(ic, tx_data->ni);
 	tx_data->ni = NULL;
@@ -14567,10 +14705,11 @@ qwz_hal_rx_reo_ent_paddr_get(struct qwz_softc *sc, void *desc, uint64_t *paddr,
 	struct ath12k_buffer_addr *buff_addr = desc;
 
 	*paddr = ((uint64_t)(FIELD_GET(BUFFER_ADDR_INFO1_ADDR,
-	    buff_addr->info1)) << 32) |
-	    FIELD_GET(BUFFER_ADDR_INFO0_ADDR, buff_addr->info0);
+	    le32toh(buff_addr->info1))) << 32) |
+	    FIELD_GET(BUFFER_ADDR_INFO0_ADDR, le32toh(buff_addr->info0));
 
-	*desc_bank = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE, buff_addr->info1);
+	*desc_bank = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE,
+	    le32toh(buff_addr->info1));
 }
 
 int
@@ -14579,15 +14718,9 @@ qwz_hal_desc_reo_parse_err(struct qwz_softc *sc, uint32_t *rx_desc,
 {
 	struct hal_reo_dest_ring *desc = (struct hal_reo_dest_ring *)rx_desc;
 	enum hal_reo_dest_ring_push_reason push_reason;
-	enum hal_reo_dest_ring_error_code err_code;
 
 	push_reason = FIELD_GET(HAL_REO_DEST_RING_INFO0_PUSH_REASON,
-	    desc->info0);
-	err_code = FIELD_GET(HAL_REO_DEST_RING_INFO0_ERROR_CODE,
-	    desc->info0);
-#if 0
-	ab->soc_stats.reo_error[err_code]++;
-#endif
+	    le32toh(desc->info0));
 	if (push_reason != HAL_REO_DEST_RING_PUSH_REASON_ERR_DETECTED &&
 	    push_reason != HAL_REO_DEST_RING_PUSH_REASON_ROUTING_INSTRUCTION) {
 		printf("%s: expected error push reason code, received %d\n",
@@ -14595,7 +14728,8 @@ qwz_hal_desc_reo_parse_err(struct qwz_softc *sc, uint32_t *rx_desc,
 		return EINVAL;
 	}
 
-	if (FIELD_GET(HAL_REO_DEST_RING_INFO0_BUFFER_TYPE, desc->info0) !=
+	if (FIELD_GET(HAL_REO_DEST_RING_INFO0_BUFFER_TYPE,
+	    le32toh(desc->info0)) !=
 	    HAL_REO_DEST_RING_BUFFER_TYPE_LINK_DESC) {
 		printf("%s: expected buffer type link_desc",
 		    sc->sc_dev.dv_xname);
@@ -14603,6 +14737,7 @@ qwz_hal_desc_reo_parse_err(struct qwz_softc *sc, uint32_t *rx_desc,
 	}
 
 	qwz_hal_rx_reo_ent_paddr_get(sc, rx_desc, paddr, desc_bank);
+	*desc_bank = FIELD_GET(DP_LINK_DESC_BANK_MASK, *desc_bank);
 
 	return 0;
 }
@@ -14619,18 +14754,18 @@ qwz_hal_rx_msdu_link_info_get(void *link_desc, uint32_t *num_msdus,
 
 	msdu = &link->msdu_link[0];
 	*rbm = FIELD_GET(BUFFER_ADDR_INFO1_RET_BUF_MGR,
-	    msdu->buf_addr_info.info1);
+	    le32toh(msdu->buf_addr_info.info1));
 
 	for (i = 0; i < *num_msdus; i++) {
 		msdu = &link->msdu_link[i];
 
 		if (!FIELD_GET(BUFFER_ADDR_INFO0_ADDR,
-		    msdu->buf_addr_info.info0)) {
+		    le32toh(msdu->buf_addr_info.info0))) {
 			*num_msdus = i;
 			break;
 		}
 		*msdu_cookies = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE,
-		    msdu->buf_addr_info.info1);
+		    le32toh(msdu->buf_addr_info.info1));
 		msdu_cookies++;
 	}
 }
@@ -14642,12 +14777,13 @@ qwz_hal_rx_msdu_link_desc_set(struct qwz_softc *sc, void *desc,
 	struct hal_wbm_release_ring *dst_desc = desc;
 	struct hal_wbm_release_ring *src_desc = link_desc;
 
+	memset(dst_desc, 0, sizeof(*dst_desc));
 	dst_desc->buf_addr_info = src_desc->buf_addr_info;
-	dst_desc->info0 |= FIELD_PREP(HAL_WBM_RELEASE_INFO0_REL_SRC_MODULE,
+	dst_desc->info0 = htole32(FIELD_PREP(HAL_WBM_RELEASE_INFO0_REL_SRC_MODULE,
 	    HAL_WBM_REL_SRC_MODULE_SW) |
 	    FIELD_PREP(HAL_WBM_RELEASE_INFO0_BM_ACTION, action) |
 	    FIELD_PREP(HAL_WBM_RELEASE_INFO0_DESC_TYPE,
-	    HAL_WBM_REL_DESC_TYPE_MSDU_LINK);
+	    HAL_WBM_REL_DESC_TYPE_MSDU_LINK));
 }
 
 int
@@ -14696,226 +14832,173 @@ qwz_dp_rx_h_msdu_start_msdu_len(struct qwz_softc *sc, struct hal_rx_desc *desc)
 	return sc->hal_rx_ops->rx_desc_get_msdu_len(desc);
 }
 
-void
-qwz_dp_process_rx_err_buf(struct qwz_softc *sc, uint32_t *ring_desc,
-    int buf_id, int drop)
+int
+qwz_dp_process_rx_err_buf(struct qwz_softc *sc, uint32_t cookie, void *list)
 {
-#if 0
-	struct qwz_pdev_dp *dp = &sc->pdev_dp;
-	struct dp_rxdma_ring *rx_ring = &dp->rx_refill_buf_ring;
-	struct mbuf *m;
-	struct qwz_rx_data *rx_data;
-	struct hal_rx_desc *rx_desc;
-	uint16_t msdu_len;
-	uint32_t hal_rx_desc_sz = sc->hal.hal_desc_sz;
+	struct qwz_rx_msdu *msdu;
 
-	if (buf_id >= rx_ring->bufs_max || isset(rx_ring->freemap, buf_id))
-		return;
+	msdu = qwz_dp_rx_reap_desc(sc, cookie, list);
+	if (msdu == NULL)
+		return 0;
 
-	rx_data = &rx_ring->rx_data[buf_id];
-	bus_dmamap_unload(sc->sc_dmat, rx_data->map);
-	m = rx_data->m;
-	rx_data->m = NULL;
-	setbit(rx_ring->freemap, buf_id);
-
-	if (drop) {
-		m_freem(m);
-		return;
-	}
-
-	rx_desc = mtod(m, struct hal_rx_desc *);
-	msdu_len = qwz_dp_rx_h_msdu_start_msdu_len(sc, rx_desc);
-	if ((msdu_len + hal_rx_desc_sz) > DP_RX_BUFFER_SIZE) {
-#if 0
-		uint8_t *hdr_status = ath12k_dp_rx_h_80211_hdr(ar->ab, rx_desc);
-		ath12k_warn(ar->ab, "invalid msdu leng %u", msdu_len);
-		ath12k_dbg_dump(ar->ab, ATH12K_DBG_DATA, NULL, "", hdr_status,
-				sizeof(struct ieee80211_hdr));
-		ath12k_dbg_dump(ar->ab, ATH12K_DBG_DATA, NULL, "", rx_desc,
-				sizeof(struct hal_rx_desc));
-#endif
-		m_freem(m);
-		return;
-	}
-
-	if (qwz_dp_rx_frag_h_mpdu(sc, m, ring_desc)) {
-		qwz_dp_rx_link_desc_return(sc, ring_desc,
-		    HAL_WBM_REL_BM_ACT_PUT_IN_IDLE);
-	}
-
-	m_freem(m);
-#endif
-	printf("%s:%d\n", __func__, __LINE__);
+	m_freem(msdu->m);
+	msdu->m = NULL;
+	return 1;
 }
 
 int
 qwz_dp_process_rx_err(struct qwz_softc *sc)
 {
-#if 0
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &ic->ic_if;
-	uint32_t msdu_cookies[HAL_NUM_RX_MSDUS_PER_LINK_DESC];
-	struct dp_link_desc_bank *link_desc_banks;
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	struct qwz_dp *dp = &sc->dp;
+	TAILQ_HEAD(, ath12k_rx_desc_info) used_list;
+	struct hal_srng *srng, *release_srng;
+	struct hal_reo_dest_ring *reo_desc;
+	struct dp_link_desc_bank *bank;
+	struct hal_rx_msdu_link *link;
 	enum hal_rx_buf_return_buf_manager rbm;
-	int tot_n_bufs_reaped, ret, i;
-	int n_bufs_reaped[MAX_RADIOS] = {0};
-	struct dp_rxdma_ring *rx_ring;
-	struct dp_srng *reo_except;
-	uint32_t desc_bank, num_msdus;
-	struct hal_srng *srng;
-	struct qwz_dp *dp;
-	void *link_desc_va;
-	int buf_id, mac_id;
+	enum hal_wbm_rel_bm_act action;
+	uint32_t cookies[HAL_NUM_RX_MSDUS_PER_LINK_DESC];
+	uint32_t desc_bank, num_msdus, cookie;
 	uint64_t paddr;
-	uint32_t *desc;
-	int is_frag;
-	uint8_t drop = 0;
+	bus_size_t offset;
+	void *release_desc;
+	int num_buffs_reaped = 0;
+	int n, i;
 
-	tot_n_bufs_reaped = 0;
-
-	dp = &sc->dp;
-	reo_except = &dp->reo_except_ring;
-	link_desc_banks = dp->link_desc_banks;
-
-	srng = &sc->hal.srng_list[reo_except->ring_id];
-#ifdef notyet
-	spin_lock_bh(&srng->lock);
-#endif
+	TAILQ_INIT(&used_list);
+	srng = &sc->hal.srng_list[dp->reo_except_ring.ring_id];
+	release_srng = &sc->hal.srng_list[dp->wbm_desc_rel_ring.ring_id];
 	qwz_hal_srng_access_begin(sc, srng);
+	qwz_hal_srng_access_begin(sc, release_srng);
 
-	while ((desc = qwz_hal_srng_dst_get_next_entry(sc, srng))) {
-		struct hal_reo_dest_ring *reo_desc =
-		    (struct hal_reo_dest_ring *)desc;
-#if 0
-		ab->soc_stats.err_ring_pkts++;
-#endif
-		ret = qwz_hal_desc_reo_parse_err(sc, desc, &paddr, &desc_bank);
-		if (ret) {
-			printf("%s: failed to parse error reo desc %d\n",
-			    sc->sc_dev.dv_xname, ret);
-			continue;
-		}
-		link_desc_va = link_desc_banks[desc_bank].vaddr +
-		    (paddr - link_desc_banks[desc_bank].paddr);
-		qwz_hal_rx_msdu_link_info_get(link_desc_va, &num_msdus,
-		    msdu_cookies, &rbm);
-		if (rbm != HAL_RX_BUF_RBM_WBM_DEV0_IDLE_DESC_LIST &&
-		    rbm != HAL_RX_BUF_RBM_SW3_BM) {
-#if 0
-			ab->soc_stats.invalid_rbm++;
-#endif
-			printf("%s: invalid return buffer manager %d\n",
-			    sc->sc_dev.dv_xname, rbm);
-			qwz_dp_rx_link_desc_return(sc, desc,
-			    HAL_WBM_REL_BM_ACT_REL_MSDU);
+	while (qwz_hal_srng_src_num_free(sc, release_srng, 1) > 0 &&
+	    (reo_desc = (struct hal_reo_dest_ring *)
+	    qwz_hal_srng_dst_get_next_entry(sc, srng))) {
+		if (FIELD_GET(HAL_REO_DEST_RING_INFO0_BUFFER_TYPE,
+		    le32toh(reo_desc->info0)) ==
+		    HAL_REO_DEST_RING_BUFFER_TYPE_MSDU) {
+			cookie = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE,
+			    le32toh(reo_desc->buf_addr_info.info1));
+			n = qwz_dp_process_rx_err_buf(sc, cookie, &used_list);
+			num_buffs_reaped += n;
+			if (!n)
+				ifp->if_ierrors++;
 			continue;
 		}
 
-		is_frag = !!(reo_desc->rx_mpdu_info.info0 &
-		    RX_MPDU_DESC_INFO0_FRAG_FLAG);
-
-		/* Process only rx fragments with one msdu per link desc below,
-		 * and drop msdu's indicated due to error reasons.
-		 */
-		if (!is_frag || num_msdus > 1) {
-			drop = 1;
-			/* Return the link desc back to wbm idle list */
-			qwz_dp_rx_link_desc_return(sc, desc,
-			   HAL_WBM_REL_BM_ACT_PUT_IN_IDLE);
+		if (qwz_hal_desc_reo_parse_err(sc, (uint32_t *)reo_desc,
+		    &paddr, &desc_bank)) {
+			ifp->if_ierrors++;
+			continue;
 		}
-
-		for (i = 0; i < num_msdus; i++) {
-			buf_id = FIELD_GET(DP_RXDMA_BUF_COOKIE_BUF_ID,
-			    msdu_cookies[i]);
-
-			mac_id = FIELD_GET(DP_RXDMA_BUF_COOKIE_PDEV_ID,
-			    msdu_cookies[i]);
-
-			qwz_dp_process_rx_err_buf(sc, desc, buf_id, drop);
-			n_bufs_reaped[mac_id]++;
-			tot_n_bufs_reaped++;
+		if (desc_bank >= nitems(dp->link_desc_banks)) {
+			ifp->if_ierrors++;
+			continue;
 		}
+		bank = &dp->link_desc_banks[desc_bank];
+		if (bank->mem == NULL || bank->size < sizeof(*link) ||
+		    paddr < bank->paddr ||
+		    paddr - bank->paddr > bank->size - sizeof(*link)) {
+			ifp->if_ierrors++;
+			continue;
+		}
+		offset = paddr - bank->paddr;
+		link = (struct hal_rx_msdu_link *)
+		    ((uint8_t *)bank->vaddr + offset);
+		bus_dmamap_sync(sc->sc_dmat, bank->mem->map, offset,
+		    sizeof(*link), BUS_DMASYNC_POSTREAD);
+		qwz_hal_rx_msdu_link_info_get(link, &num_msdus, cookies, &rbm);
+		action = HAL_WBM_REL_BM_ACT_PUT_IN_IDLE;
+		if (rbm != dp->idle_link_rbm && rbm != HAL_RX_BUF_RBM_SW3_BM &&
+		    rbm != sc->hw_params.hal_params->rx_buf_rbm) {
+			action = HAL_WBM_REL_BM_ACT_REL_MSDU;
+			ifp->if_ierrors++;
+		} else {
+			/* Fragment reassembly is not implemented. */
+			for (i = 0; i < num_msdus; i++) {
+				n = qwz_dp_process_rx_err_buf(sc, cookies[i],
+				    &used_list);
+				num_buffs_reaped += n;
+				if (!n)
+					ifp->if_ierrors++;
+			}
+		}
+		bus_dmamap_sync(sc->sc_dmat, bank->mem->map, offset,
+		    sizeof(*link), BUS_DMASYNC_PREREAD);
+
+		release_desc = qwz_hal_srng_src_get_next_entry(sc, release_srng);
+		KASSERT(release_desc != NULL);
+		qwz_hal_rx_msdu_link_desc_set(sc, release_desc, reo_desc, action);
 	}
 
+	qwz_hal_srng_access_end(sc, release_srng);
 	qwz_hal_srng_access_end(sc, srng);
-#ifdef notyet
-	spin_unlock_bh(&srng->lock);
-#endif
-	for (i = 0; i < sc->num_radios; i++) {
-		if (!n_bufs_reaped[i])
-			continue;
-
-		rx_ring = &sc->pdev_dp.rx_refill_buf_ring;
-
-		qwz_dp_rxbufs_replenish(sc, i, rx_ring, n_bufs_reaped[i],
-		    sc->hw_params.hal_params->rx_buf_rbm);
-	}
-
-	ifp->if_ierrors += tot_n_bufs_reaped;
-
-	return tot_n_bufs_reaped;
-#endif
-	return 0;
+	if (num_buffs_reaped)
+		qwz_dp_rxbufs_replenish(sc, &dp->rx_refill_buf_ring,
+		    &used_list, num_buffs_reaped);
+	ifp->if_ierrors += num_buffs_reaped;
+	return num_buffs_reaped;
 }
 
 int
-qwz_hal_wbm_desc_parse_err(void *desc, struct hal_rx_wbm_rel_info *rel_info)
+qwz_hal_wbm_desc_parse_err(struct qwz_softc *sc, void *desc,
+    struct hal_rx_wbm_rel_info *rel_info)
 {
-	struct hal_wbm_release_ring *wbm_desc = desc;
+	struct hal_wbm_release_ring_rx *wbm_desc = desc;
+	struct hal_wbm_release_ring_cc_rx *cc_desc = desc;
 	enum hal_wbm_rel_desc_type type;
 	enum hal_wbm_rel_src_module rel_src;
-	enum hal_rx_buf_return_buf_manager ret_buf_mgr;
+	enum hal_rx_buf_return_buf_manager rbm;
+	uint32_t info0 = le32toh(wbm_desc->info0);
+	uint32_t msdu_info = le32toh(wbm_desc->rx_msdu_info.info0);
 
-	type = FIELD_GET(HAL_WBM_RELEASE_INFO0_DESC_TYPE, wbm_desc->info0);
-
-	/* We expect only WBM_REL buffer type */
+	type = FIELD_GET(HAL_WBM_RELEASE_INFO0_DESC_TYPE, info0);
 	if (type != HAL_WBM_REL_DESC_TYPE_REL_MSDU)
-		return -EINVAL;
+		return EINVAL;
 
-	rel_src = FIELD_GET(HAL_WBM_RELEASE_INFO0_REL_SRC_MODULE,
-	    wbm_desc->info0);
+	rel_src = FIELD_GET(HAL_WBM_RELEASE_INFO0_REL_SRC_MODULE, info0);
 	if (rel_src != HAL_WBM_REL_SRC_MODULE_RXDMA &&
 	    rel_src != HAL_WBM_REL_SRC_MODULE_REO)
 		return EINVAL;
 
-	ret_buf_mgr = FIELD_GET(BUFFER_ADDR_INFO1_RET_BUF_MGR,
-	    wbm_desc->buf_addr_info.info1);
-	if (ret_buf_mgr != HAL_RX_BUF_RBM_SW3_BM) {
-#if 0
-		ab->soc_stats.invalid_rbm++;
-#endif
-		return EINVAL;
+	/* Cookie conversion changes both the cookie and RBM locations. */
+	if (info0 & HAL_WBM_RELEASE_RX_INFO0_CC_STATUS) {
+		rbm = FIELD_GET(HAL_WBM_RELEASE_RX_CC_INFO0_RBM, info0);
+		rel_info->cookie = FIELD_GET(HAL_WBM_RELEASE_RX_CC_INFO1_COOKIE,
+		    le32toh(cc_desc->info1));
+	} else {
+		rbm = FIELD_GET(BUFFER_ADDR_INFO1_RET_BUF_MGR,
+		    le32toh(wbm_desc->buf_addr_info.info1));
+		rel_info->cookie = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE,
+		    le32toh(wbm_desc->buf_addr_info.info1));
 	}
+	if (rbm != HAL_RX_BUF_RBM_SW3_BM &&
+	    rbm != sc->hw_params.hal_params->rx_buf_rbm)
+		return EINVAL;
 
-	rel_info->cookie = FIELD_GET(BUFFER_ADDR_INFO1_SW_COOKIE,
-	    wbm_desc->buf_addr_info.info1);
 	rel_info->err_rel_src = rel_src;
 	if (rel_src == HAL_WBM_REL_SRC_MODULE_REO) {
 		rel_info->push_reason = FIELD_GET(
-		    HAL_WBM_RELEASE_INFO0_REO_PUSH_REASON, wbm_desc->info0);
+		    HAL_WBM_RELEASE_INFO0_REO_PUSH_REASON, info0);
 		rel_info->err_code = FIELD_GET(
-		    HAL_WBM_RELEASE_INFO0_REO_ERROR_CODE, wbm_desc->info0);
+		    HAL_WBM_RELEASE_INFO0_REO_ERROR_CODE, info0);
 	} else {
 		rel_info->push_reason = FIELD_GET(
-		    HAL_WBM_RELEASE_INFO0_RXDMA_PUSH_REASON, wbm_desc->info0);
+		    HAL_WBM_RELEASE_INFO0_RXDMA_PUSH_REASON, info0);
 		rel_info->err_code = FIELD_GET(
-		    HAL_WBM_RELEASE_INFO0_RXDMA_ERROR_CODE, wbm_desc->info0);
+		    HAL_WBM_RELEASE_INFO0_RXDMA_ERROR_CODE, info0);
 	}
 
-	rel_info->first_msdu = FIELD_GET(HAL_WBM_RELEASE_INFO2_FIRST_MSDU,
-	    wbm_desc->info2);
-	rel_info->last_msdu = FIELD_GET(HAL_WBM_RELEASE_INFO2_LAST_MSDU,
-	    wbm_desc->info2);
-
+	rel_info->first_msdu = !!(msdu_info &
+	    RX_MSDU_DESC_INFO0_FIRST_MSDU_IN_MPDU);
+	rel_info->last_msdu = !!(msdu_info &
+	    RX_MSDU_DESC_INFO0_LAST_MSDU_IN_MPDU);
+	rel_info->continuation = !!(msdu_info &
+	    RX_MSDU_DESC_INFO0_MSDU_CONTINUATION);
+	rel_info->peer_id = FIELD_GET(RX_MPDU_DESC_META_DATA_PEER_ID,
+	    le32toh(wbm_desc->rx_mpdu_info.meta_data));
 	return 0;
-}
-
-int
-qwz_dp_rx_h_null_q_desc(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
-    struct qwz_rx_msdu_list *msdu_list)
-{
-	printf("%s: not implemented\n", __func__);
-	return ENOTSUP;
 }
 
 int
@@ -14993,117 +15076,78 @@ qwz_dp_rx_wbm_err(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
 	if (drop) {
 		m_freem(msdu->m);
 		msdu->m = NULL;
+		sc->sc_ic.ic_if.if_ierrors++;
 		return;
 	}
 
 	qwz_dp_rx_deliver_msdu(sc, msdu);
+	msdu->m = NULL;
 }
 
 int
 qwz_dp_rx_process_wbm_err(struct qwz_softc *sc)
 {
-#if 0
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct ifnet *ifp = &ic->ic_if;
+	struct ifnet *ifp = &sc->sc_ic.ic_if;
 	struct qwz_dp *dp = &sc->dp;
-	struct dp_rxdma_ring *rx_ring;
 	struct hal_rx_wbm_rel_info err_info;
 	struct hal_srng *srng;
-	struct qwz_rx_msdu_list msdu_list[MAX_RADIOS];
+	struct qwz_rx_msdu_list msdu_list;
+	TAILQ_HEAD(, ath12k_rx_desc_info) used_list;
 	struct qwz_rx_msdu *msdu;
-	struct mbuf *m;
-	struct qwz_rx_data *rx_data;
-	uint32_t *rx_desc;
-	int idx, mac_id;
-	int num_buffs_reaped[MAX_RADIOS] = {0};
-	int total_num_buffs_reaped = 0;
-	int ret, i;
+	void *rx_desc;
+	int num_buffs_reaped = 0;
 
-	for (i = 0; i < sc->num_radios; i++)
-		TAILQ_INIT(&msdu_list[i]);
-
+	TAILQ_INIT(&msdu_list);
+	TAILQ_INIT(&used_list);
 	srng = &sc->hal.srng_list[dp->rx_rel_ring.ring_id];
-#ifdef notyet
-	spin_lock_bh(&srng->lock);
-#endif
 	qwz_hal_srng_access_begin(sc, srng);
 
 	while ((rx_desc = qwz_hal_srng_dst_get_next_entry(sc, srng))) {
-		ret = qwz_hal_wbm_desc_parse_err(rx_desc, &err_info);
-		if (ret) {
-			printf("%s: failed to parse rx error in wbm_rel "
-			    "ring desc %d\n", sc->sc_dev.dv_xname, ret);
+		if (qwz_hal_wbm_desc_parse_err(sc, rx_desc, &err_info)) {
+			ifp->if_ierrors++;
 			continue;
 		}
 
-		idx = FIELD_GET(DP_RXDMA_BUF_COOKIE_BUF_ID, err_info.cookie);
-		mac_id = FIELD_GET(DP_RXDMA_BUF_COOKIE_PDEV_ID, err_info.cookie);
-
-		if (mac_id >= MAX_RADIOS)
+		msdu = qwz_dp_rx_reap_desc(sc, err_info.cookie, &used_list);
+		if (msdu == NULL) {
+			ifp->if_ierrors++;
 			continue;
-
-		rx_ring = &sc->pdev_dp.rx_refill_buf_ring;
-		if (idx >= rx_ring->bufs_max || isset(rx_ring->freemap, idx))
-			continue;
-
-		rx_data = &rx_ring->rx_data[idx];
-		bus_dmamap_unload(sc->sc_dmat, rx_data->map);
-		m = rx_data->m;
-		rx_data->m = NULL;
-		setbit(rx_ring->freemap, idx);
-
-		num_buffs_reaped[mac_id]++;
-		total_num_buffs_reaped++;
+		}
+		num_buffs_reaped++;
 
 		if (err_info.push_reason !=
-		    HAL_REO_DEST_RING_PUSH_REASON_ERR_DETECTED) {
-			m_freem(m);
+		    HAL_REO_DEST_RING_PUSH_REASON_ERR_DETECTED ||
+		    test_bit(ATH12K_CAC_RUNNING, sc->sc_flags)) {
+			m_freem(msdu->m);
+			msdu->m = NULL;
+			ifp->if_ierrors++;
 			continue;
 		}
 
-		msdu = &rx_data->rx_msdu;
-		memset(&msdu->rxi, 0, sizeof(msdu->rxi));
-		msdu->m = m;
 		msdu->err_rel_src = err_info.err_rel_src;
 		msdu->err_code = err_info.err_code;
-		msdu->rx_desc = mtod(m, struct hal_rx_desc *);
-		TAILQ_INSERT_TAIL(&msdu_list[mac_id], msdu, entry);
+		msdu->is_first_msdu = err_info.first_msdu;
+		msdu->is_last_msdu = err_info.last_msdu;
+		msdu->is_continuation = err_info.continuation;
+		msdu->peer_id = err_info.peer_id;
+		msdu->seq_no = sc->hal_rx_ops->rx_desc_get_mpdu_start_seq_no(
+		    msdu->rx_desc);
+		msdu->tid = sc->hal_rx_ops->rx_desc_get_mpdu_tid(msdu->rx_desc);
+		TAILQ_INSERT_TAIL(&msdu_list, msdu, entry);
 	}
 
 	qwz_hal_srng_access_end(sc, srng);
-#ifdef notyet
-	spin_unlock_bh(&srng->lock);
-#endif
-	if (!total_num_buffs_reaped)
-		goto done;
 
-	for (i = 0; i < sc->num_radios; i++) {
-		if (!num_buffs_reaped[i])
-			continue;
-
-		rx_ring = &sc->pdev_dp.rx_refill_buf_ring;
-		qwz_dp_rxbufs_replenish(sc, i, rx_ring, num_buffs_reaped[i],
-		    sc->hw_params.hal_params->rx_buf_rbm);
+	while ((msdu = TAILQ_FIRST(&msdu_list))) {
+		TAILQ_REMOVE(&msdu_list, msdu, entry);
+		qwz_dp_rx_wbm_err(sc, msdu, &msdu_list);
 	}
 
-	for (i = 0; i < sc->num_radios; i++) {
-		while ((msdu = TAILQ_FIRST(msdu_list))) {
-			TAILQ_REMOVE(msdu_list, msdu, entry);
-			if (test_bit(ATH12K_CAC_RUNNING, sc->sc_flags)) {
-				m_freem(msdu->m);
-				msdu->m = NULL;
-				continue;
-			}
-			qwz_dp_rx_wbm_err(sc, msdu, &msdu_list[i]);
-			msdu->m = NULL;
-		}
-	}
-done:
-	ifp->if_ierrors += total_num_buffs_reaped;
+	if (num_buffs_reaped)
+		qwz_dp_rxbufs_replenish(sc, &dp->rx_refill_buf_ring,
+		    &used_list, num_buffs_reaped);
 
-	return total_num_buffs_reaped;
-#endif
-	return 0;
+	return num_buffs_reaped;
 }
 
 struct qwz_rx_msdu *
@@ -15417,19 +15461,43 @@ qwz_dp_rx_h_undecap(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
     struct hal_rx_desc *rx_desc, enum hal_encrypt_type enctype,
     int decrypted)
 {
-	uint8_t decap;
+	struct ieee80211_frame *wh;
+	uint8_t decap, *qos;
+	int ret;
 
 	decap = qwz_dp_rx_h_msdu_start_decap_type(sc, rx_desc);
 
 	switch (decap) {
 	case DP_RX_DECAP_TYPE_NATIVE_WIFI:
-		return qwz_dp_rx_h_undecap_nwifi(sc, msdu, NULL, enctype);
-	case DP_RX_DECAP_TYPE_RAW:
-		qwz_dp_rx_h_undecap_raw(sc, msdu, enctype, decrypted);
+		ret = qwz_dp_rx_h_undecap_nwifi(sc, msdu, NULL, enctype);
 		break;
 	case DP_RX_DECAP_TYPE_ETHERNET2_DIX:
-		return qwz_dp_rx_h_undecap_eth(sc, msdu, rx_desc);
+		ret = qwz_dp_rx_h_undecap_eth(sc, msdu, rx_desc);
+		break;
+	case DP_RX_DECAP_TYPE_RAW:
+		qwz_dp_rx_h_undecap_raw(sc, msdu, enctype, decrypted);
+		return 0;
+	default:
+		return 0;
 	}
+	if (ret)
+		return ret;
+
+	wh = mtod(msdu->m, struct ieee80211_frame *);
+	if (msdu->m->m_len < ieee80211_get_hdrlen(wh))
+		return EINVAL;
+	if (ieee80211_has_qos(wh)) {
+		if (ieee80211_has_addr4(wh))
+			qos = ((struct ieee80211_qosframe_addr4 *)wh)->i_qos;
+		else
+			qos = ((struct ieee80211_qosframe *)wh)->i_qos;
+		qos[0] &= ~IEEE80211_QOS_AMSDU;
+	}
+
+	/* Hardware has deaggregated and reordered these frames. */
+	if (!msdu->is_first_msdu)
+		msdu->rxi.rxi_flags |= IEEE80211_RXI_SAME_SEQ;
+	msdu->rxi.rxi_flags |= IEEE80211_RXI_AMPDU_DONE;
 	return 0;
 }
 
@@ -15607,6 +15675,45 @@ qwz_dp_rx_process_msdu(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
 	return qwz_dp_rx_h_mpdu(sc, msdu, rx_desc);
 }
 
+int
+qwz_dp_rx_h_null_q_desc(struct qwz_softc *sc, struct qwz_rx_msdu *msdu,
+    struct qwz_rx_msdu_list *msdu_list)
+{
+	struct qwz_rx_msdu *next, *tmp;
+	uint32_t desc_sz = sc->hal.hal_desc_sz;
+	uint16_t msdu_len;
+	uint8_t l3pad;
+	int nbufs;
+
+	msdu_len = qwz_dp_rx_h_msdu_start_msdu_len(sc, msdu->rx_desc);
+	if (msdu_len + desc_sz > DP_RX_BUFFER_SIZE) {
+		nbufs = howmany(msdu_len - (DP_RX_BUFFER_SIZE - desc_sz),
+		    DP_RX_BUFFER_SIZE - desc_sz);
+		TAILQ_FOREACH_SAFE(next, msdu_list, entry, tmp) {
+			if (!nbufs)
+				break;
+			if (next->err_rel_src != HAL_WBM_REL_SRC_MODULE_REO ||
+			    next->err_code !=
+			    HAL_REO_DEST_RING_ERROR_CODE_DESC_ADDR_ZERO)
+				continue;
+			TAILQ_REMOVE(msdu_list, next, entry);
+			m_freem(next->m);
+			next->m = NULL;
+			sc->sc_ic.ic_if.if_ierrors++;
+			nbufs--;
+		}
+		return EINVAL;
+	}
+	if (msdu->is_continuation)
+		return EINVAL;
+
+	l3pad = qwz_dp_rx_h_msdu_end_l3pad(sc, msdu->rx_desc);
+	if (desc_sz + l3pad + msdu_len > DP_RX_BUFFER_SIZE)
+		return EINVAL;
+
+	return qwz_dp_rx_process_msdu(sc, msdu, msdu_list);
+}
+
 void
 qwz_dp_rx_deliver_msdu(struct qwz_softc *sc, struct qwz_rx_msdu *msdu)
 {
@@ -15621,6 +15728,42 @@ qwz_dp_rx_deliver_msdu(struct qwz_softc *sc, struct qwz_rx_msdu *msdu)
 #if NBPFILTER > 0
 	if (sc->sc_drvbpf != NULL) {
 		struct qwz_rx_radiotap_header *tap = &sc->sc_rxtap;
+		uint8_t mcs, pkt_type, nss;
+		uint16_t chan_flags;
+		uint32_t freq;
+
+		mcs = sc->hal_rx_ops->rx_desc_get_msdu_rate_mcs(msdu->rx_desc);
+		pkt_type = sc->hal_rx_ops->rx_desc_get_msdu_pkt_type(
+		    msdu->rx_desc);
+		nss = hweight8(sc->hal_rx_ops->rx_desc_get_msdu_nss(
+		    msdu->rx_desc));
+		freq = qwz_dp_rx_h_msdu_start_freq(sc, msdu->rx_desc);
+
+		tap->wr_ihdr.it_present = htole32(QWZ_RX_RADIOTAP_PRESENT &
+		    ~(1 << IEEE80211_RADIOTAP_DBM_ANTSIGNAL));
+		tap->wr_flags = 0;
+		tap->wr_chan_freq = htole16(ic->ic_channels[freq & 0xff].ic_freq);
+		chan_flags = ic->ic_channels[freq & 0xff].ic_flags;
+		if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11N) {
+			if (nss > 1)
+				mcs += 8 * (nss - 1);
+			tap->wr_rate = (0x80 | mcs);
+		} else {
+			uint8_t rateidx;
+			uint16_t rate;
+
+			if (qwz_mac_hw_ratecode_to_legacy_rate(ni, mcs,
+			    pkt_type, &rateidx, &rate) == 0)
+				tap->wr_rate = rate;
+			else
+				tap->wr_rate = 0;
+
+			chan_flags &= ~IEEE80211_CHAN_HT;
+			chan_flags &= ~IEEE80211_CHAN_VHT;
+			chan_flags &= ~IEEE80211_CHAN_40MHZ;
+		}
+		tap->wr_chan_flags = htole16(chan_flags);
+		tap->wr_dbm_antsignal = 0;
 
 		bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_rxtap_len,
 		    msdu->m, BPF_DIRECTION_IN);
@@ -15644,6 +15787,7 @@ qwz_dp_rx_process_received_packets(struct qwz_softc *sc,
 			DNPRINTF(QWZ_D_MAC, "Unable to process msdu: %d", ret);
 			m_freem(msdu->m);
 			msdu->m = NULL;
+			sc->sc_ic.ic_if.if_ierrors++;
 			continue;
 		}
 
@@ -15745,9 +15889,10 @@ try_again:
 		    RX_MSDU_DESC_INFO0_MSDU_CONTINUATION);
 		msdu->peer_id = FIELD_GET(RX_MPDU_DESC_META_DATA_PEER_ID,
 		    desc->rx_mpdu_info.meta_data);
-		msdu->seq_no = FIELD_GET(RX_MPDU_DESC_INFO0_SEQ_NUM,
-		    desc->rx_mpdu_info.info0);
-		msdu->tid = 0; /* no RX_QUEUE_NUM in wifi7 */
+		msdu->rx_desc = mtod(m, struct hal_rx_desc *);
+		msdu->seq_no = sc->hal_rx_ops->rx_desc_get_mpdu_start_seq_no(
+		    msdu->rx_desc);
+		msdu->tid = sc->hal_rx_ops->rx_desc_get_mpdu_tid(msdu->rx_desc);
 
 		msdu->mac_id = mac_id;
 		TAILQ_INSERT_TAIL(&msdu_list[mac_id], msdu, entry);
@@ -16204,14 +16349,16 @@ void
 qwz_hal_reo_status_queue_stats(struct qwz_softc *sc, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_get_queue_stats_status *desc =
 	    (struct hal_reo_get_queue_stats_status *)tlv->value;
 
 	status->uniform_hdr.cmd_num =
-	    FIELD_GET(HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->hdr.info0);
+	    FIELD_GET(HAL_REO_STATUS_HDR_INFO0_STATUS_NUM,
+	    le32toh(desc->hdr.info0));
 	status->uniform_hdr.cmd_status =
-	    FIELD_GET(HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->hdr.info0);
+	    FIELD_GET(HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS,
+	    le32toh(desc->hdr.info0));
 #if 0
 	ath12k_dbg(ab, ATH12K_DBG_HAL, "Queue stats status:\n");
 	ath12k_dbg(ab, ATH12K_DBG_HAL, "header: cmd_num %d status %d\n",
@@ -16270,16 +16417,16 @@ void
 qwz_hal_reo_flush_queue_status(struct qwz_softc *sc, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_flush_queue_status *desc =
 	    (struct hal_reo_flush_queue_status *)tlv->value;
 
 	status->uniform_hdr.cmd_num = FIELD_GET(
-	   HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->hdr.info0);
+	   HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, le32toh(desc->hdr.info0));
 	status->uniform_hdr.cmd_status = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, le32toh(desc->hdr.info0));
 	status->u.flush_queue.err_detected = FIELD_GET(
-	    HAL_REO_FLUSH_QUEUE_INFO0_ERR_DETECTED, desc->info0);
+	    HAL_REO_FLUSH_QUEUE_INFO0_ERR_DETECTED, le32toh(desc->info0));
 }
 
 void
@@ -16287,37 +16434,39 @@ qwz_hal_reo_flush_cache_status(struct qwz_softc *sc, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
 	struct ath12k_hal *hal = &sc->hal;
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_flush_cache_status *desc =
 	    (struct hal_reo_flush_cache_status *)tlv->value;
 
 	status->uniform_hdr.cmd_num = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, le32toh(desc->hdr.info0));
 	status->uniform_hdr.cmd_status = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, le32toh(desc->hdr.info0));
 
 	status->u.flush_cache.err_detected = FIELD_GET(
-	    HAL_REO_FLUSH_CACHE_STATUS_INFO0_IS_ERR, desc->info0);
+	    HAL_REO_FLUSH_CACHE_STATUS_INFO0_IS_ERR, le32toh(desc->info0));
 	status->u.flush_cache.err_code = FIELD_GET(
-	    HAL_REO_FLUSH_CACHE_STATUS_INFO0_BLOCK_ERR_CODE, desc->info0);
+	    HAL_REO_FLUSH_CACHE_STATUS_INFO0_BLOCK_ERR_CODE,
+	    le32toh(desc->info0));
 	if (!status->u.flush_cache.err_code)
 		hal->avail_blk_resource |= BIT(hal->current_blk_index);
 
 	status->u.flush_cache.cache_controller_flush_status_hit = FIELD_GET(
-	    HAL_REO_FLUSH_CACHE_STATUS_INFO0_FLUSH_STATUS_HIT, desc->info0);
+	    HAL_REO_FLUSH_CACHE_STATUS_INFO0_FLUSH_STATUS_HIT,
+	    le32toh(desc->info0));
 
 	status->u.flush_cache.cache_controller_flush_status_desc_type =
 	    FIELD_GET(HAL_REO_FLUSH_CACHE_STATUS_INFO0_FLUSH_DESC_TYPE,
-	    desc->info0);
+	    le32toh(desc->info0));
 	status->u.flush_cache.cache_controller_flush_status_client_id =
 	    FIELD_GET(HAL_REO_FLUSH_CACHE_STATUS_INFO0_FLUSH_CLIENT_ID,
-	    desc->info0);
+	    le32toh(desc->info0));
 	status->u.flush_cache.cache_controller_flush_status_err =
 	    FIELD_GET(HAL_REO_FLUSH_CACHE_STATUS_INFO0_FLUSH_ERR,
-	    desc->info0);
+	    le32toh(desc->info0));
 	status->u.flush_cache.cache_controller_flush_status_cnt =
 	    FIELD_GET(HAL_REO_FLUSH_CACHE_STATUS_INFO0_FLUSH_COUNT,
-	    desc->info0);
+	    le32toh(desc->info0));
 }
 
 void
@@ -16325,19 +16474,19 @@ qwz_hal_reo_unblk_cache_status(struct qwz_softc *sc, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
 	struct ath12k_hal *hal = &sc->hal;
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_unblock_cache_status *desc =
 	   (struct hal_reo_unblock_cache_status *)tlv->value;
 
 	status->uniform_hdr.cmd_num = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, le32toh(desc->hdr.info0));
 	status->uniform_hdr.cmd_status = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, le32toh(desc->hdr.info0));
 
 	status->u.unblock_cache.err_detected = FIELD_GET(
-	    HAL_REO_UNBLOCK_CACHE_STATUS_INFO0_IS_ERR, desc->info0);
+	    HAL_REO_UNBLOCK_CACHE_STATUS_INFO0_IS_ERR, le32toh(desc->info0));
 	status->u.unblock_cache.unblock_type = FIELD_GET(
-	    HAL_REO_UNBLOCK_CACHE_STATUS_INFO0_TYPE, desc->info0);
+	    HAL_REO_UNBLOCK_CACHE_STATUS_INFO0_TYPE, le32toh(desc->info0));
 
 	if (!status->u.unblock_cache.err_detected &&
 	    status->u.unblock_cache.unblock_type ==
@@ -16349,68 +16498,75 @@ void
 qwz_hal_reo_flush_timeout_list_status(struct qwz_softc *ab, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_flush_timeout_list_status *desc =
 	    (struct hal_reo_flush_timeout_list_status *)tlv->value;
 
 	status->uniform_hdr.cmd_num = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, le32toh(desc->hdr.info0));
 	status->uniform_hdr.cmd_status = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, le32toh(desc->hdr.info0));
 
 	status->u.timeout_list.err_detected = FIELD_GET(
-	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO0_IS_ERR, desc->info0);
+	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO0_IS_ERR, le32toh(desc->info0));
 	status->u.timeout_list.list_empty = FIELD_GET(
-	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO0_LIST_EMPTY, desc->info0);
+	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO0_LIST_EMPTY,
+	    le32toh(desc->info0));
 
 	status->u.timeout_list.release_desc_cnt = FIELD_GET(
-	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO1_REL_DESC_COUNT, desc->info1);
+	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO1_REL_DESC_COUNT,
+	    le32toh(desc->info1));
 	status->u.timeout_list.fwd_buf_cnt = FIELD_GET(
-	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO1_FWD_BUF_COUNT, desc->info1);
+	    HAL_REO_FLUSH_TIMEOUT_STATUS_INFO1_FWD_BUF_COUNT,
+	    le32toh(desc->info1));
 }
 
 void
 qwz_hal_reo_desc_thresh_reached_status(struct qwz_softc *sc, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_desc_thresh_reached_status *desc =
 	    (struct hal_reo_desc_thresh_reached_status *)tlv->value;
 
 	status->uniform_hdr.cmd_num = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, le32toh(desc->hdr.info0));
 	status->uniform_hdr.cmd_status = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->hdr.info0);
+	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, le32toh(desc->hdr.info0));
 
 	status->u.desc_thresh_reached.threshold_idx = FIELD_GET(
-	    HAL_REO_DESC_THRESH_STATUS_INFO0_THRESH_INDEX, desc->info0);
+	    HAL_REO_DESC_THRESH_STATUS_INFO0_THRESH_INDEX,
+	    le32toh(desc->info0));
 
 	status->u.desc_thresh_reached.link_desc_counter0 = FIELD_GET(
-	    HAL_REO_DESC_THRESH_STATUS_INFO1_LINK_DESC_COUNTER0, desc->info1);
+	    HAL_REO_DESC_THRESH_STATUS_INFO1_LINK_DESC_COUNTER0,
+	    le32toh(desc->info1));
 
 	status->u.desc_thresh_reached.link_desc_counter1 = FIELD_GET(
-	    HAL_REO_DESC_THRESH_STATUS_INFO2_LINK_DESC_COUNTER1, desc->info2);
+	    HAL_REO_DESC_THRESH_STATUS_INFO2_LINK_DESC_COUNTER1,
+	    le32toh(desc->info2));
 
 	status->u.desc_thresh_reached.link_desc_counter2 = FIELD_GET(
-	    HAL_REO_DESC_THRESH_STATUS_INFO3_LINK_DESC_COUNTER2, desc->info3);
+	    HAL_REO_DESC_THRESH_STATUS_INFO3_LINK_DESC_COUNTER2,
+	    le32toh(desc->info3));
 
 	status->u.desc_thresh_reached.link_desc_counter_sum = FIELD_GET(
 	    HAL_REO_DESC_THRESH_STATUS_INFO4_LINK_DESC_COUNTER_SUM,
-	    desc->info4);
+	    le32toh(desc->info4));
 }
 
 void
 qwz_hal_reo_update_rx_reo_queue_status(struct qwz_softc *ab, uint32_t *reo_desc,
     struct hal_reo_status *status)
 {
-	struct hal_tlv_hdr *tlv = (struct hal_tlv_hdr *)reo_desc;
+	struct hal_tlv_64_hdr *tlv = (struct hal_tlv_64_hdr *)reo_desc;
 	struct hal_reo_status_hdr *desc =
 	    (struct hal_reo_status_hdr *)tlv->value;
 
 	status->uniform_hdr.cmd_num = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, desc->info0);
+	    HAL_REO_STATUS_HDR_INFO0_STATUS_NUM, le32toh(desc->info0));
 	status->uniform_hdr.cmd_status = FIELD_GET(
-	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, desc->info0);
+	    HAL_REO_STATUS_HDR_INFO0_EXEC_STATUS, le32toh(desc->info0));
 }
 
 int
@@ -16421,11 +16577,11 @@ qwz_dp_process_reo_status(struct qwz_softc *sc)
 	struct dp_reo_cmd *cmd, *tmp;
 	int found = 0, ret = 0;
 	uint32_t *reo_desc;
+	struct hal_tlv_64_hdr *tlv;
 	uint16_t tag;
 	struct hal_reo_status reo_status;
 
 	srng = &sc->hal.srng_list[dp->reo_status_ring.ring_id];
-	memset(&reo_status, 0, sizeof(reo_status));
 #ifdef notyet
 	spin_lock_bh(&srng->lock);
 #endif
@@ -16433,8 +16589,10 @@ qwz_dp_process_reo_status(struct qwz_softc *sc)
 
 	while ((reo_desc = qwz_hal_srng_dst_get_next_entry(sc, srng))) {
 		ret = 1;
+		memset(&reo_status, 0, sizeof(reo_status));
 
-		tag = FIELD_GET(HAL_SRNG_TLV_HDR_TAG, *reo_desc);
+		tlv = (struct hal_tlv_64_hdr *)reo_desc;
+		tag = FIELD_GET(HAL_SRNG_TLV_HDR_TAG, le64toh(tlv->tl));
 		switch (tag) {
 		case HAL_REO_GET_QUEUE_STATS_STATUS:
 			qwz_hal_reo_status_queue_stats(sc, reo_desc,
@@ -16447,6 +16605,10 @@ qwz_dp_process_reo_status(struct qwz_softc *sc)
 		case HAL_REO_FLUSH_CACHE_STATUS:
 			qwz_hal_reo_flush_cache_status(sc, reo_desc,
 			    &reo_status);
+			if (reo_status.u.flush_cache.err_detected ||
+			    reo_status.u.flush_cache.err_code ||
+			    reo_status.u.flush_cache.cache_controller_flush_status_err)
+				reo_status.uniform_hdr.cmd_status = HAL_REO_CMD_FAILED;
 			break;
 		case HAL_REO_UNBLOCK_CACHE_STATUS:
 			qwz_hal_reo_unblk_cache_status(sc, reo_desc,
@@ -16483,8 +16645,9 @@ qwz_dp_process_reo_status(struct qwz_softc *sc)
 		spin_unlock_bh(&dp->reo_cmd_lock);
 #endif
 		if (found) {
-			cmd->handler(dp, (void *)&cmd->data,
-			    reo_status.uniform_hdr.cmd_status);
+			if (cmd->handler != NULL)
+				cmd->handler(dp, (void *)&cmd->data,
+				    reo_status.uniform_hdr.cmd_status);
 			free(cmd, M_DEVBUF, sizeof(*cmd));
 		}
 		found = 0;
@@ -17431,7 +17594,7 @@ qwz_wmi_vdev_install_key(struct qwz_softc *sc,
 
 	m = qwz_wmi_alloc_mbuf(len);
 	if (m == NULL)
-		return -ENOMEM;
+		return ENOMEM;
 
 	cmd = (struct wmi_vdev_install_key_cmd *)(mtod(m, uint8_t *) +
 	    sizeof(struct ath12k_htc_hdr) + sizeof(struct wmi_cmd_hdr));
@@ -18852,10 +19015,6 @@ qwz_core_qmi_firmware_ready(struct qwz_softc *sc)
 		    sc->sc_dev.dv_xname, ret);
 		goto err_core_stop;
 	}
-
-#if 0 /* TODO: Is this in the right spot for OpenBSD? */
-	sc->ops.irq_enable(sc);
-#endif
 
 #if 0
 	mutex_unlock(&ab->core_lock);
@@ -22464,6 +22623,13 @@ qwz_peer_delete(struct qwz_softc *sc, uint32_t vdev_id, uint8_t pdev_id,
 		}
 	}
 
+	ret = qwz_peer_rx_tid_cleanup(sc, peer);
+	if (ret) {
+		printf("%s: failed to retire peer RX queues: %d\n",
+		    sc->sc_dev.dv_xname, ret);
+		return ret;
+	}
+
 	TAILQ_REMOVE(&sc->peers, peer, entry);
 	qwz_node_clear_peer_id(sc, peer);
 	free(peer, M_DEVBUF, sizeof(*peer));
@@ -22528,44 +22694,27 @@ qwz_dp_tx_send_reo_cmd(struct qwz_softc *sc, struct dp_rx_tid *rx_tid,
     void (*cb)(struct qwz_dp *, void *, enum hal_reo_cmd_status))
 {
 	struct qwz_dp *dp = &sc->dp;
-	struct dp_reo_cmd *dp_cmd;
+	struct dp_reo_cmd *dp_cmd = NULL;
 	struct hal_srng *cmd_ring;
 	int cmd_num;
 
 	if (test_bit(ATH12K_FLAG_CRASH_FLUSH, sc->sc_flags))
 		return ESHUTDOWN;
 
+	if (cmd->flag & HAL_REO_CMD_FLG_NEED_STATUS) {
+		dp_cmd = malloc(sizeof(*dp_cmd), M_DEVBUF, M_ZERO | M_NOWAIT);
+		if (dp_cmd == NULL)
+			return ENOMEM;
+		memcpy(&dp_cmd->data, rx_tid, sizeof(*rx_tid));
+		dp_cmd->handler = cb;
+	}
+
 	cmd_ring = &sc->hal.srng_list[dp->reo_cmd_ring.ring_id];
-	cmd_num = qwz_hal_reo_cmd_send(sc, cmd_ring, type, cmd);
-	/* cmd_num should start from 1, during failure return the error code */
-	if (cmd_num < 0)
+	cmd_num = qwz_hal_reo_cmd_send(sc, cmd_ring, type, cmd, dp_cmd);
+	if (cmd_num < 0) {
+		free(dp_cmd, M_DEVBUF, sizeof(*dp_cmd));
 		return cmd_num;
-
-	/* reo cmd ring descriptors has cmd_num starting from 1 */
-	if (cmd_num == 0)
-		return EINVAL;
-
-	if (!cb)
-		return 0;
-
-	/* Can this be optimized so that we keep the pending command list only
-	 * for tid delete command to free up the resource on the command status
-	 * indication?
-	 */
-	dp_cmd = malloc(sizeof(*dp_cmd), M_DEVBUF, M_ZERO | M_NOWAIT);
-	if (!dp_cmd)
-		return ENOMEM;
-
-	memcpy(&dp_cmd->data, rx_tid, sizeof(struct dp_rx_tid));
-	dp_cmd->cmd_num = cmd_num;
-	dp_cmd->handler = cb;
-#ifdef notyet
-	spin_lock_bh(&dp->reo_cmd_lock);
-#endif
-	TAILQ_INSERT_TAIL(&dp->reo_cmd_list, dp_cmd, entry);
-#ifdef notyet
-	spin_unlock_bh(&dp->reo_cmd_lock);
-#endif
+	}
 	return 0;
 }
 
@@ -22680,141 +22829,131 @@ qwz_hal_reo_qdesc_setup(void *vaddr, int tid, uint32_t ba_window_size,
 }
 
 void
-qwz_dp_reo_cmd_free(struct qwz_dp *dp, void *ctx,
+qwz_dp_rx_tid_retire_done(struct qwz_dp *dp, void *ctx,
     enum hal_reo_cmd_status status)
 {
-	struct qwz_softc *sc = dp->sc;
 	struct dp_rx_tid *rx_tid = ctx;
+	struct qwz_rx_tid_retire *retire = &dp->rx_tid_retire[rx_tid->tid];
 
-	if (status != HAL_REO_CMD_SUCCESS)
-		printf("%s: failed to flush rx tid hw desc, tid %d status %d\n",
-		    sc->sc_dev.dv_xname, rx_tid->tid, status);
+	KASSERT(retire->data.mem == rx_tid->mem);
+	KASSERT(retire->state == QWZ_RX_TID_DELETE_PENDING ||
+	    retire->state == QWZ_RX_TID_FLUSH_PENDING);
 
-	qwz_dp_rx_tid_clear(sc, rx_tid);
+	if (status != HAL_REO_CMD_SUCCESS) {
+		retire->state = QWZ_RX_TID_RETIRE_FAILED;
+		printf("%s: RX queue retirement failed, tid %u status %d\n",
+		    dp->sc->sc_dev.dv_xname, rx_tid->tid, status);
+	} else if (retire->state == QWZ_RX_TID_DELETE_PENDING) {
+		retire->flush_offset = retire->data.size;
+		retire->state = QWZ_RX_TID_FLUSH_READY;
+	} else if (retire->flush_offset != 0) {
+		retire->state = QWZ_RX_TID_FLUSH_READY;
+	} else {
+		memset(retire, 0, sizeof(*retire));
+	}
+	wakeup(dp->rx_tid_retire);
 }
 
-void
-qwz_dp_reo_cache_flush(struct qwz_softc *sc, struct dp_rx_tid *rx_tid)
+int
+qwz_dp_rx_tid_retire_submit(struct qwz_softc *sc,
+    struct qwz_rx_tid_retire *retire)
 {
 	struct ath12k_hal_reo_cmd cmd = {0};
-	unsigned long tot_desc_sz, desc_sz;
+	enum qwz_rx_tid_retire_state state = retire->state;
+	enum hal_reo_cmd_type type;
+	uint32_t offset = retire->flush_offset;
+	uint64_t paddr = retire->data.paddr;
 	int ret;
 
-	tot_desc_sz = rx_tid->size;
-	desc_sz = qwz_hal_reo_qdesc_size(0, HAL_DESC_REO_NON_QOS_TID);
-
-	while (tot_desc_sz > desc_sz) {
-		tot_desc_sz -= desc_sz;
-		cmd.addr_lo = (rx_tid->paddr + tot_desc_sz) & 0xffffffff;
-		cmd.addr_hi = rx_tid->paddr >> 32;
-		ret = qwz_dp_tx_send_reo_cmd(sc, rx_tid,
-		    HAL_REO_CMD_FLUSH_CACHE, &cmd, NULL);
-		if (ret) {
-			printf("%s: failed to send HAL_REO_CMD_FLUSH_CACHE, "
-			    "tid %d (%d)\n", sc->sc_dev.dv_xname, rx_tid->tid,
-			    ret);
-		}
+	cmd.flag = HAL_REO_CMD_FLG_NEED_STATUS;
+	if (state == QWZ_RX_TID_DELETE_READY) {
+		/* WCN7850 requires VLD to remain set until the cache flush. */
+		cmd.upd0 = HAL_REO_CMD_UPD0_VLD;
+		cmd.upd1 = HAL_REO_CMD_UPD1_VLD;
+		type = HAL_REO_CMD_UPDATE_RX_QUEUE;
+		retire->state = QWZ_RX_TID_DELETE_PENDING;
+	} else {
+		KASSERT(state == QWZ_RX_TID_FLUSH_READY);
+		KASSERT(offset >= sizeof(struct hal_rx_reo_queue));
+		retire->flush_offset -= sizeof(struct hal_rx_reo_queue);
+		paddr += retire->flush_offset;
+		if (retire->flush_offset == 0)
+			cmd.flag |= HAL_REO_CMD_FLG_FLUSH_FWD_ALL_MPDUS;
+		type = HAL_REO_CMD_FLUSH_CACHE;
+		retire->state = QWZ_RX_TID_FLUSH_PENDING;
 	}
-
-	memset(&cmd, 0, sizeof(cmd));
-	cmd.addr_lo = rx_tid->paddr & 0xffffffff;
-	cmd.addr_hi = rx_tid->paddr >> 32;
-	cmd.flag |= HAL_REO_CMD_FLG_NEED_STATUS;
-	ret = qwz_dp_tx_send_reo_cmd(sc, rx_tid, HAL_REO_CMD_FLUSH_CACHE,
-	    &cmd, qwz_dp_reo_cmd_free);
+	cmd.addr_lo = paddr & 0xffffffff;
+	cmd.addr_hi = paddr >> 32;
+	ret = qwz_dp_tx_send_reo_cmd(sc, &retire->data, type, &cmd,
+	    qwz_dp_rx_tid_retire_done);
 	if (ret) {
-		printf("%s: failed to send HAL_REO_CMD_FLUSH_CACHE cmd, "
-		    "tid %d (%d)\n", sc->sc_dev.dv_xname, rx_tid->tid, ret);
-		qwz_dp_rx_tid_clear(sc, rx_tid);
+		retire->state = state;
+		retire->flush_offset = offset;
 	}
+	return ret;
 }
 
-void
-qwz_dp_rx_tid_del_func(struct qwz_dp *dp, void *ctx,
-    enum hal_reo_cmd_status status)
+int
+qwz_dp_rx_tid_retire_wait(struct qwz_softc *sc)
 {
-	struct qwz_softc *sc = dp->sc;
-	struct dp_rx_tid *rx_tid = ctx;
-	struct dp_reo_cache_flush_elem *elem, *tmp;
+	struct qwz_dp *dp = &sc->dp;
+	struct qwz_rx_tid_retire *retire;
+	uint64_t deadline = getnsecuptime() + SEC_TO_NSEC(3);
 	uint64_t now;
+	int i, pending, error, ret;
 
-	if (status == HAL_REO_CMD_DRAIN) {
-		qwz_dp_rx_tid_clear(sc, rx_tid);
-		return;
-	} else if (status != HAL_REO_CMD_SUCCESS) {
-		/* Shouldn't happen! Cleanup in case of other failure? */
-		printf("%s: failed to delete rx tid %d hw descriptor %d\n",
-		    sc->sc_dev.dv_xname, rx_tid->tid, status);
-		return;
-	}
-
-	elem = malloc(sizeof(*elem), M_DEVBUF, M_ZERO | M_NOWAIT);
-	if (!elem) {
-		qwz_dp_rx_tid_clear(sc, rx_tid);
-		return;
-	}
-
-	now = getnsecuptime();
-	elem->ts = now;
-	memcpy(&elem->data, rx_tid, sizeof(*rx_tid));
-
-	qwz_dp_rx_tid_clear(sc, rx_tid);
-
-#ifdef notyet
-	spin_lock_bh(&dp->reo_cmd_lock);
-#endif
-	TAILQ_INSERT_TAIL(&dp->reo_cmd_cache_flush_list, elem, entry);
-	dp->reo_cmd_cache_flush_count++;
-
-	/* Flush and invalidate aged REO desc from HW cache */
-	TAILQ_FOREACH_SAFE(elem, &dp->reo_cmd_cache_flush_list, entry, tmp) {
-		if (dp->reo_cmd_cache_flush_count > DP_REO_DESC_FREE_THRESHOLD ||
-		    now >= elem->ts + MSEC_TO_NSEC(DP_REO_DESC_FREE_TIMEOUT_MS)) {
-			TAILQ_REMOVE(&dp->reo_cmd_cache_flush_list, elem, entry);
-			dp->reo_cmd_cache_flush_count--;
-#ifdef notyet
-			spin_unlock_bh(&dp->reo_cmd_lock);
-#endif
-			qwz_dp_reo_cache_flush(sc, &elem->data);
-			free(elem, M_DEVBUF, sizeof(*elem));
-#ifdef notyet
-			spin_lock_bh(&dp->reo_cmd_lock);
-#endif
+	for (;;) {
+		pending = 0;
+		error = 0;
+		for (i = 0; i < nitems(dp->rx_tid_retire); i++) {
+			retire = &dp->rx_tid_retire[i];
+			switch (retire->state) {
+			case QWZ_RX_TID_REUSABLE:
+				break;
+			case QWZ_RX_TID_DELETE_READY:
+			case QWZ_RX_TID_FLUSH_READY:
+				ret = qwz_dp_rx_tid_retire_submit(sc, retire);
+				if (ret && !error)
+					error = ret;
+				pending = 1;
+				break;
+			case QWZ_RX_TID_DELETE_PENDING:
+			case QWZ_RX_TID_FLUSH_PENDING:
+				pending = 1;
+				break;
+			case QWZ_RX_TID_RETIRE_FAILED:
+				error = EIO;
+				break;
+			}
 		}
+		if (error)
+			return error;
+		if (!pending)
+			return 0;
+		now = getnsecuptime();
+		if (now >= deadline)
+			return ETIMEDOUT;
+		ret = tsleep_nsec(dp->rx_tid_retire, 0, "qwzreo",
+		    deadline - now);
+		if (ret)
+			return ret;
 	}
-#ifdef notyet
-	spin_unlock_bh(&dp->reo_cmd_lock);
-#endif
 }
 
 void
 qwz_peer_rx_tid_delete(struct qwz_softc *sc, struct ath12k_peer *peer,
     uint8_t tid)
 {
-	struct ath12k_hal_reo_cmd cmd = {0};
 	struct dp_rx_tid *rx_tid = &peer->rx_tid[tid];
-	int ret;
+	struct qwz_rx_tid_retire *retire = &sc->dp.rx_tid_retire[tid];
 
 	if (!rx_tid->active)
 		return;
 
+	KASSERT(retire->state == QWZ_RX_TID_REUSABLE);
+	retire->data = *rx_tid;
+	retire->state = QWZ_RX_TID_DELETE_READY;
 	rx_tid->active = 0;
-
-	cmd.flag = HAL_REO_CMD_FLG_NEED_STATUS;
-	cmd.addr_lo = rx_tid->paddr & 0xffffffff;
-	cmd.addr_hi = rx_tid->paddr >> 32;
-	cmd.upd0 |= HAL_REO_CMD_UPD0_VLD;
-	ret = qwz_dp_tx_send_reo_cmd(sc, rx_tid, HAL_REO_CMD_UPDATE_RX_QUEUE,
-	    &cmd, qwz_dp_rx_tid_del_func);
-	if (ret) {
-		if (ret != ESHUTDOWN) {
-			printf("%s: failed to send "
-			    "HAL_REO_CMD_UPDATE_RX_QUEUE cmd, tid %d (%d)\n",
-			    sc->sc_dev.dv_xname, tid, ret);
-		}
-
-		qwz_dp_rx_tid_clear(sc, rx_tid);
-	}
 }
 
 void
@@ -22861,11 +23000,11 @@ qwz_peer_frags_flush(struct qwz_softc *sc, struct ath12k_peer *peer)
 	}
 }
 
-void
+int
 qwz_peer_rx_tid_cleanup(struct qwz_softc *sc, struct ath12k_peer *peer)
 {
 	struct dp_rx_tid *rx_tid;
-	int i;
+	int i, ret;
 #ifdef notyet
 	lockdep_assert_held(&ar->ab->base_lock);
 #endif
@@ -22880,6 +23019,12 @@ qwz_peer_rx_tid_cleanup(struct qwz_softc *sc, struct ath12k_peer *peer)
 		spin_lock_bh(&ar->ab->base_lock);
 #endif
 	}
+	ret = qwz_dp_rx_tid_retire_wait(sc);
+	if (ret)
+		return ret;
+	for (i = 0; i <= HAL_DESC_REO_NON_QOS_TID; i++)
+		qwz_dp_rx_tid_clear(sc, &peer->rx_tid[i]);
+	return 0;
 }
 
 int
@@ -22960,6 +23105,9 @@ qwz_peer_rx_tid_setup(struct qwz_softc *sc, struct ieee80211_node *ni,
 	peer = qwz_peer_find_by_id(sc, nq->peer_id);
 	if (peer == NULL)
 		return ENOENT;
+	if (peer->delete_pending || !peer->is_mapped ||
+	    dp->rx_tid_retire[tid].state != QWZ_RX_TID_REUSABLE)
+		return EBUSY;
 
 #ifdef notyet
 	spin_lock_bh(&ab->base_lock);
@@ -23566,8 +23714,6 @@ qwz_mac_station_remove(struct qwz_softc *sc, struct qwz_vif *arvif,
     uint8_t pdev_id, struct ath12k_peer *peer)
 {
 	int ret;
-
-	qwz_peer_rx_tid_cleanup(sc, peer);
 
 	ret = qwz_peer_delete(sc, arvif->vdev_id, pdev_id, peer);
 	if (ret) {
@@ -24272,10 +24418,17 @@ qwz_auth(struct qwz_softc *sc)
 int
 qwz_deauth(struct qwz_softc *sc)
 {
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct qwz_node *nq = (struct qwz_node *)ic->ic_bss;
 	struct qwz_vif *arvif = &sc->sc_vif;
 	uint8_t pdev_id = 0; /* TODO: derive pdev ID somehow? */
 	struct ath12k_peer *peer = TAILQ_FIRST(&sc->peers);
 	int ret;
+
+	if (ic->ic_opmode == IEEE80211_M_STA) {
+		ic->ic_bss->ni_txrate = 0;
+		nq->flags = 0;
+	}
 
 	ret = qwz_mac_vdev_stop(sc, arvif, pdev_id);
 	if (ret) {
@@ -24287,13 +24440,6 @@ qwz_deauth(struct qwz_softc *sc)
 	if (peer == NULL)
 		return 0;
 
-	ret = qwz_wmi_set_peer_param(sc, peer->addr, arvif->vdev_id,
-	    pdev_id, WMI_PEER_AUTHORIZE, 0);
-	if (ret) {
-		printf("%s: unable to deauthorize BSS peer: %d\n",
-		   sc->sc_dev.dv_xname, ret);
-		return ret;
-	}
 
 	ret = qwz_mac_station_remove(sc, arvif, pdev_id, peer);
 	if (ret)
@@ -24677,7 +24823,34 @@ qwz_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
 }
 
 int
-qwz_run(struct qwz_softc *sc)
+qwz_setup_peer_smps(struct qwz_softc *sc, uint8_t pdev_id, struct qwz_vif *arvif,
+    uint8_t *addr, uint16_t htcaps)
+{
+	uint16_t smps;
+	uint32_t val;
+
+	smps = (htcaps & IEEE80211_HTCAP_SMPS_MASK) >>
+	    IEEE80211_HTCAP_SMPS_SHIFT;
+
+	switch (smps) {
+	case IEEE80211_HTCAP_SMPS_STA:
+		val = WMI_PEER_SMPS_STATIC;
+		break;
+	case IEEE80211_HTCAP_SMPS_DYN:
+		val = WMI_PEER_SMPS_DYNAMIC;
+		break;
+	case IEEE80211_HTCAP_SMPS_DIS:
+	default:
+		val = WMI_PEER_SMPS_PS_NONE;
+		break;
+	}
+
+	return qwz_wmi_set_peer_param(sc, addr, arvif->vdev_id,
+	    pdev_id, WMI_PEER_MIMO_PS_STATE, val);
+}
+
+int
+qwz_assoc(struct qwz_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni = ic->ic_bss;
@@ -24749,15 +24922,53 @@ qwz_run(struct qwz_softc *sc)
 			return ret;
 		}
 	}
-#if 0
-	ret = ath12k_setup_peer_smps(ar, arvif, sta->addr,
-				     &sta->deflink.ht_cap,
-				     le16_to_cpu(sta->deflink.he_6ghz_capa.capa));
+
+	return 0;
+}
+
+int
+qwz_run(struct qwz_softc *sc)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_node *ni = ic->ic_bss;
+	struct qwz_vif *arvif = &sc->sc_vif;
+	uint8_t pdev_id = 0; /* TODO: derive pdev ID somehow? */
+	struct peer_assoc_params peer_arg;
+	int ret;
+
+	qwz_peer_assoc_prepare(sc, arvif, ni, &peer_arg, 1);
+
+	peer_arg.is_assoc = 1;
+
+	sc->peer_assoc_done = 0;
+	ret = qwz_wmi_send_peer_assoc_cmd(sc, pdev_id, &peer_arg);
 	if (ret) {
-		ath12k_warn(ar->ab, "failed to setup peer SMPS for vdev %d: %d\n",
-			    arvif->vdev_id, ret);
+		printf("%s: failed to run peer assoc for %s vdev %i: %d\n",
+		    sc->sc_dev.dv_xname, ether_sprintf(ni->ni_macaddr),
+		    arvif->vdev_id, ret);
 		return ret;
 	}
+
+	while (!sc->peer_assoc_done) {
+		ret = tsleep_nsec(&sc->peer_assoc_done, 0, "qwzassoc",
+		    SEC_TO_NSEC(1));
+		if (ret) {
+			printf("%s: failed to get peer assoc conf event "
+			    "for %s vdev %i\n", sc->sc_dev.dv_xname,
+			    ether_sprintf(ni->ni_macaddr), arvif->vdev_id);
+			return ret;
+		}
+	}
+	if (ni->ni_flags & IEEE80211_NODE_HT) {
+		ret = qwz_setup_peer_smps(sc, pdev_id, arvif, ni->ni_macaddr,
+		    ni->ni_htcaps);
+		if (ret) {
+			printf("%s: failed to setup SMPS for vdev %d: %d\n",
+			    sc->sc_dev.dv_xname, arvif->vdev_id, ret);
+			return ret;
+		}
+	}
+#if 0
 
 	if (!ath12k_mac_vif_recalc_sta_he_txbf(ar, vif, &he_cap)) {
 		ath12k_warn(ar->ab, "failed to recalc he txbf for vdev %i on bss %pM\n",
@@ -24792,8 +25003,6 @@ qwz_run(struct qwz_softc *sc)
 	DNPRINTF(QWZ_D_MAC, "%s: vdev %d up (associated) bssid %s aid %d\n",
 	    __func__, arvif->vdev_id, ether_sprintf(ni->ni_bssid), arvif->aid);
 
-	/* Enable "ext" IRQs for datapath. */
-	sc->ops.irq_enable(sc);
 
 	return 0;
 }
@@ -24805,9 +25014,19 @@ qwz_run_stop(struct qwz_softc *sc)
 	struct qwz_vif *arvif = &sc->sc_vif;
 	uint8_t pdev_id = 0; /* TODO: derive pdev ID somehow? */
 	struct qwz_node *nq = (void *)ic->ic_bss;
+	struct ath12k_peer *peer = TAILQ_FIRST(&sc->peers);
 	int ret;
 
-	sc->ops.irq_disable(sc);
+	if (peer != NULL) {
+		ret = qwz_wmi_set_peer_param(sc, peer->addr, arvif->vdev_id,
+		    pdev_id, WMI_PEER_AUTHORIZE, 0);
+		if (ret) {
+			printf("%s: unable to deauthorize BSS peer: %d\n",
+			   sc->sc_dev.dv_xname, ret);
+			return ret;
+		}
+
+	}
 
 	if (ic->ic_opmode == IEEE80211_M_STA) {
 		ic->ic_bss->ni_txrate = 0;
@@ -24834,11 +25053,11 @@ qwz_radiotap_attach(struct qwz_softc *sc)
 
 	sc->sc_rxtap_len = sizeof(sc->sc_rxtapu);
 	sc->sc_rxtap.wr_ihdr.it_len = htole16(sc->sc_rxtap_len);
-	sc->sc_rxtap.wr_ihdr.it_present = htole32(IWX_RX_RADIOTAP_PRESENT);
+	sc->sc_rxtap.wr_ihdr.it_present = htole32(QWZ_RX_RADIOTAP_PRESENT);
 
 	sc->sc_txtap_len = sizeof(sc->sc_txtapu);
 	sc->sc_txtap.wt_ihdr.it_len = htole16(sc->sc_txtap_len);
-	sc->sc_txtap.wt_ihdr.it_present = htole32(IWX_TX_RADIOTAP_PRESENT);
+	sc->sc_txtap.wt_ihdr.it_present = htole32(QWZ_TX_RADIOTAP_PRESENT);
 }
 #endif
 
