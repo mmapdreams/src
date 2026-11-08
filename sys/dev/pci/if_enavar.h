@@ -162,11 +162,12 @@ struct ena_queue {
 	struct ena_com_io_sq	*eq_rx_sq;
 	struct ena_com_io_cq	*eq_rx_cq;
 	struct ena_rx_buf	*eq_rx_buf;	/* [rx_ring_size] */
+	uint16_t		*eq_rx_free_ids; /* [rx_ring_size] */
 	struct if_rxring	 eq_rx_ring;
 	struct timeout		 eq_rx_refill;
 	unsigned int		 eq_rx_ring_size;
-	unsigned int		 eq_rx_prod;	/* next slot to refill */
-	unsigned int		 eq_rx_cons;	/* next slot to consume */
+	unsigned int		 eq_rx_prod;	/* next free_ids entry to post */
+	unsigned int		 eq_rx_cons;	/* next free_ids entry to return */
 	struct mutex		 eq_rx_mtx;
 
 	/*

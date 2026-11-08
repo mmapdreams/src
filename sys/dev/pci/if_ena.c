@@ -1504,6 +1504,8 @@ ena_queue_alloc(struct ena_softc *sc, struct ena_queue *eq)
 	    sizeof(uint16_t), M_DEVBUF, M_WAITOK | M_ZERO);
 	eq->eq_rx_buf = mallocarray(eq->eq_rx_ring_size,
 	    sizeof(struct ena_rx_buf), M_DEVBUF, M_WAITOK | M_ZERO);
+	eq->eq_rx_free_ids = mallocarray(eq->eq_rx_ring_size,
+	    sizeof(uint16_t), M_DEVBUF, M_WAITOK | M_ZERO);
 
 	for (i = 0; i < eq->eq_tx_ring_size; i++) {
 		eq->eq_tx_free_ids[i] = i;
@@ -1514,6 +1516,7 @@ ena_queue_alloc(struct ena_softc *sc, struct ena_queue *eq)
 			goto fail;
 	}
 	for (i = 0; i < eq->eq_rx_ring_size; i++) {
+		eq->eq_rx_free_ids[i] = i;
 		if (bus_dmamap_create(sc->sc_dmat, MCLBYTES, 1, MCLBYTES, 0,
 		    BUS_DMA_WAITOK | BUS_DMA_64BIT,
 		    &eq->eq_rx_buf[i].erx_map) != 0)
@@ -1580,6 +1583,12 @@ ena_queue_free(struct ena_softc *sc, struct ena_queue *eq)
 		eq->eq_tx_buf = NULL;
 	}
 
+	if (eq->eq_rx_free_ids != NULL) {
+		free(eq->eq_rx_free_ids, M_DEVBUF,
+		    eq->eq_rx_ring_size * sizeof(uint16_t));
+		eq->eq_rx_free_ids = NULL;
+	}
+
 	if (eq->eq_tx_free_ids != NULL) {
 		free(eq->eq_tx_free_ids, M_DEVBUF,
 		    eq->eq_tx_ring_size * sizeof(uint16_t));
@@ -1614,8 +1623,26 @@ ena_rx_fill(struct ena_queue *eq)
 	while (slots > 0) {
 		struct ena_rx_buf *rb;
 
-		req_id = eq->eq_rx_prod;
+		/*
+		 * The device completes RX descriptors out of order, so
+		 * the slot after the last one posted may still be owned
+		 * by the device.  Post only req_ids that have come back
+		 * through a completion (or were never posted), as the TX
+		 * side and the Linux and FreeBSD drivers do.
+		 */
+		req_id = eq->eq_rx_free_ids[eq->eq_rx_prod];
 		rb = &eq->eq_rx_buf[req_id];
+		if (rb->erx_mbuf != NULL) {
+			/* Free-id accounting is broken; never re-post. */
+			eq->eq_kst_rx_errors++;
+			if (sc->sc_reset_tq != NULL &&
+			    task_add(sc->sc_reset_tq, &sc->sc_reset_task)) {
+				printf("%s: RX queue %u refill of busy slot "
+				    "%u, resetting\n", ENA_DEVNAME(sc),
+				    eq->eq_idx, req_id);
+			}
+			break;
+		}
 
 		m = MCLGETL(NULL, M_DONTWAIT, MCLBYTES);
 		if (m == NULL) {
@@ -1645,7 +1672,7 @@ ena_rx_fill(struct ena_queue *eq)
 			break;
 		}
 
-		eq->eq_rx_prod = ENA_RX_RING_IDX_NEXT(req_id,
+		eq->eq_rx_prod = ENA_RX_RING_IDX_NEXT(eq->eq_rx_prod,
 		    eq->eq_rx_ring_size);
 		slots--;
 	}
@@ -1756,6 +1783,7 @@ ena_rxeof(struct ena_queue *eq)
 				mh->m_pkthdr.len += m->m_len;
 			}
 
+			eq->eq_rx_free_ids[eq->eq_rx_cons] = req_id;
 			eq->eq_rx_cons = ENA_RX_RING_IDX_NEXT(eq->eq_rx_cons,
 			    eq->eq_rx_ring_size);
 			done++;
