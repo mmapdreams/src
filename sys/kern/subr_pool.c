@@ -1979,11 +1979,22 @@ pool_cache_list_put(struct pool *pp, struct pool_cache_item *pl)
 	rpl = TAILQ_NEXT(pl, ci_nextl);
 
 	pl_enter(pp, &pp->pr_lock);
-	do {
+	/*
+	 * The head's ci_nextl was overwritten by its linkage on
+	 * pr_cache_lists; every other item still carries the magic written
+	 * by pool_cache_put().  Checking it before following ci_next turns a
+	 * cached item that was written to after it was freed (for example a
+	 * cluster a device DMA'd into after the driver gave it back) into a
+	 * panic naming the pool and the item, instead of a protection fault
+	 * on a garbage pointer in the gc.
+	 */
+	next = pl->ci_next;
+	pool_do_put(pp, pl);
+	while ((pl = next) != NULL) {
+		pool_cache_item_magic_check(pp, pl);
 		next = pl->ci_next;
 		pool_do_put(pp, pl);
-		pl = next;
-	} while (pl != NULL);
+	}
 	pl_leave(pp, &pp->pr_lock);
 
 	return (rpl);
