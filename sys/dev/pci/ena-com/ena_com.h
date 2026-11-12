@@ -580,8 +580,11 @@ int ena_com_create_io_queue(struct ena_com_dev *ena_dev,
 /* ena_com_destroy_io_queue - Destroy IO queue with the queue id - qid.
  * @ena_dev: ENA communication layer struct
  * @qid - the caller virtual queue id.
+ *
+ * @return - 0 when the device acknowledged the destruction, negative value
+ * on failure (the host side is freed regardless).
  */
-void ena_com_destroy_io_queue(struct ena_com_dev *ena_dev, u16 qid);
+int ena_com_destroy_io_queue(struct ena_com_dev *ena_dev, u16 qid);
 
 /* ena_com_get_io_handlers - Return the io queue handlers
  * @ena_dev: ENA communication layer struct

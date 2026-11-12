@@ -179,7 +179,7 @@ int	ena_rxrinfo(struct ena_softc *, struct if_rxrinfo *);
 int	ena_create_io_queues(struct ena_softc *);
 void	ena_destroy_io_queues(struct ena_softc *);
 int	ena_queue_alloc(struct ena_softc *, struct ena_queue *);
-void	ena_queue_free(struct ena_softc *, struct ena_queue *);
+void	ena_queue_free(struct ena_softc *, struct ena_queue *, int);
 
 /* datapath */
 void	ena_rx_fill(struct ena_queue *);
@@ -525,6 +525,7 @@ ena_detach(struct device *self, int flags)
 		ena_com_set_admin_running_state(ena_dev, false);
 	if (ena_com_dev_reset(ena_dev, ENA_REGS_RESET_NORMAL) != 0)
 		return (EBUSY);
+	sc->sc_dev_quiesced = 1;
 	ena_destroy_io_queues(sc);
 
 	/*
@@ -851,6 +852,7 @@ ena_setup_interrupts(struct ena_softc *sc, struct pci_attach_args *pa)
 		eq->eq_tx_ring_size = sc->sc_tx_ring_size;
 		eq->eq_rx_ring_size = sc->sc_rx_ring_size;
 		mtx_init(&eq->eq_rx_mtx, IPL_NET);
+		ml_init(&eq->eq_rx_held);
 		timeout_set(&eq->eq_rx_refill, ena_rx_refill, eq);
 
 		if (pci_intr_map_msix(pa, vec, &ih) != 0) {
@@ -1402,6 +1404,9 @@ ena_create_io_queues(struct ena_softc *sc)
 	unsigned int i;
 	int rc;
 
+	/* From here on the device may own host buffers again. */
+	sc->sc_dev_quiesced = 0;
+
 	for (i = 0; i < sc->sc_nqueues; i++) {
 		struct ena_queue *eq = &sc->sc_queues[i];
 		uint16_t qid;
@@ -1480,16 +1485,25 @@ ena_destroy_io_queues(struct ena_softc *sc)
 
 	for (i = 0; i < sc->sc_nqueues; i++) {
 		struct ena_queue *eq = &sc->sc_queues[i];
+		int rx_acked = sc->sc_dev_quiesced;
 
 		if (eq->eq_tx_sq != NULL) {
 			ena_com_destroy_io_queue(ena_dev, ENA_IO_TXQ_IDX(i));
 			eq->eq_tx_sq = NULL;
 		}
 		if (eq->eq_rx_sq != NULL) {
-			ena_com_destroy_io_queue(ena_dev, ENA_IO_RXQ_IDX(i));
+			/*
+			 * The device can write into the posted RX clusters
+			 * until it acknowledges DESTROY_SQ/CQ for this queue
+			 * or a device reset.  Without either, the clusters
+			 * must not go back to the pool.
+			 */
+			if (ena_com_destroy_io_queue(ena_dev,
+			    ENA_IO_RXQ_IDX(i)) == 0)
+				rx_acked = 1;
 			eq->eq_rx_sq = NULL;
 		}
-		ena_queue_free(sc, eq);
+		ena_queue_free(sc, eq, rx_acked);
 	}
 }
 
@@ -1530,16 +1544,27 @@ ena_queue_alloc(struct ena_softc *sc, struct ena_queue *eq)
 	eq->eq_tx_stall_ticks = 0;
 	eq->eq_rx_prod = 0;
 	eq->eq_rx_cons = 0;
+	eq->eq_rx_fault = 0;
 
 	return (0);
 
 fail:
-	ena_queue_free(sc, eq);
+	ena_queue_free(sc, eq, sc->sc_dev_quiesced);
 	return (ENOMEM);
 }
 
+/*
+ * Release the host side of a queue.  rx_acked says whether the device has
+ * acknowledged that it will no longer write into the RX clusters (a reset or
+ * the destruction of the RX queue completed).  When it has not, the clusters
+ * are parked on eq_rx_held instead of being freed: a cluster returned to the
+ * mbuf pool while the device still holds its descriptor gets a frame DMA'd
+ * over the pool's free-list pointers, which is how the mcl2k free list was
+ * found corrupted after a run of RX resets.  The parked clusters are freed
+ * by the next call that is acknowledged.
+ */
 void
-ena_queue_free(struct ena_softc *sc, struct ena_queue *eq)
+ena_queue_free(struct ena_softc *sc, struct ena_queue *eq, int rx_acked)
 {
 	unsigned int i;
 
@@ -1551,7 +1576,8 @@ ena_queue_free(struct ena_softc *sc, struct ena_queue *eq)
 				if (rb->erx_mbuf != NULL) {
 					bus_dmamap_unload(sc->sc_dmat,
 					    rb->erx_map);
-					m_freem(rb->erx_mbuf);
+					ml_enqueue(&eq->eq_rx_held,
+					    rb->erx_mbuf);
 					rb->erx_mbuf = NULL;
 				}
 				bus_dmamap_destroy(sc->sc_dmat, rb->erx_map);
@@ -1562,6 +1588,9 @@ ena_queue_free(struct ena_softc *sc, struct ena_queue *eq)
 		    eq->eq_rx_ring_size * sizeof(struct ena_rx_buf));
 		eq->eq_rx_buf = NULL;
 	}
+
+	if (rx_acked)
+		ml_purge(&eq->eq_rx_held);
 
 	if (eq->eq_tx_buf != NULL) {
 		for (i = 0; i < eq->eq_tx_ring_size; i++) {
@@ -1616,6 +1645,10 @@ ena_rx_fill(struct ena_queue *eq)
 
 	MUTEX_ASSERT_LOCKED(&eq->eq_rx_mtx);
 
+	/* Post nothing more to a ring whose accounting is broken. */
+	if (eq->eq_rx_fault)
+		return;
+
 	slots = if_rxr_get(&eq->eq_rx_ring, eq->eq_rx_ring_size);
 	if (slots == 0)
 		return;
@@ -1634,6 +1667,7 @@ ena_rx_fill(struct ena_queue *eq)
 		rb = &eq->eq_rx_buf[req_id];
 		if (rb->erx_mbuf != NULL) {
 			/* Free-id accounting is broken; never re-post. */
+			eq->eq_rx_fault = 1;
 			eq->eq_kst_rx_errors++;
 			if (sc->sc_reset_tq != NULL &&
 			    task_add(sc->sc_reset_tq, &sc->sc_reset_task)) {
@@ -1714,6 +1748,10 @@ ena_rxeof(struct ena_queue *eq)
 	unsigned int done = 0;
 	int rc, budget = ENA_RX_CLEANUP_BUDGET;
 
+	/* Faulted: the reset task owns this ring now. */
+	if (eq->eq_rx_fault)
+		return (0);
+
 	for (;;) {
 		uint16_t req_id;
 		unsigned int i;
@@ -1751,6 +1789,13 @@ ena_rxeof(struct ena_queue *eq)
 			 * device fault here is handled.  Printed once per
 			 * reset, not per completion, because this runs in the
 			 * RX interrupt path.
+			 *
+			 * Nothing reaped on this pass can be trusted either:
+			 * the device may still write into a cluster whose
+			 * completion it reported, so park it all on
+			 * eq_rx_held, stop reaping and refilling this ring,
+			 * and leave the rest of the clusters posted until
+			 * the reset is acknowledged (ena_queue_free).
 			 */
 			if (m == NULL) {
 				eq->eq_kst_rx_errors++;
@@ -1762,8 +1807,16 @@ ena_rxeof(struct ena_queue *eq)
 					    ENA_DEVNAME(sc), eq->eq_idx,
 					    req_id);
 				}
-				m_freem(mh);
-				goto done;
+				mtx_enter(&eq->eq_rx_mtx);
+				eq->eq_rx_fault = 1;
+				if (mh != NULL)
+					ml_enqueue(&eq->eq_rx_held, mh);
+#ifndef SMALL_KERNEL
+				ml_enlist(&eq->eq_rx_held, &mltcp);
+#endif
+				ml_enlist(&eq->eq_rx_held, &ml);
+				mtx_leave(&eq->eq_rx_mtx);
+				return (done);
 			}
 			rb->erx_mbuf = NULL;
 
@@ -1818,7 +1871,6 @@ ena_rxeof(struct ena_queue *eq)
 			ml_enqueue(&ml, mh);
 	}
 
-done:
 #ifndef SMALL_KERNEL
 	if (ifiq_input(eq->eq_ifiq, &mltcp))
 		if_rxr_livelocked(&eq->eq_rx_ring);
@@ -2333,6 +2385,8 @@ ena_reset_device(struct ena_softc *sc)
 	if (error != 0)
 		return (error);
 
+	/* Acknowledged: the device owns no host buffer any more. */
+	sc->sc_dev_quiesced = 1;
 	ena_destroy_io_queues(sc);
 	if (sc->sc_rss_ready) {
 		ena_com_rss_destroy(ena_dev);

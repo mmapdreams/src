@@ -2256,24 +2256,34 @@ error:
 	return ret;
 }
 
-void ena_com_destroy_io_queue(struct ena_com_dev *ena_dev, u16 qid)
+/*
+ * Returns 0 only when the device acknowledged both DESTROY commands, so the
+ * caller knows whether the host buffers posted to the queue may be reused.
+ * The host side is freed either way.
+ */
+int ena_com_destroy_io_queue(struct ena_com_dev *ena_dev, u16 qid)
 {
 	struct ena_com_io_sq *io_sq;
 	struct ena_com_io_cq *io_cq;
+	int ret, rc;
 
 	if (unlikely(qid >= ENA_TOTAL_NUM_QUEUES)) {
 		ena_trc_err(ena_dev, "Qid (%d) is bigger than max num of queues (%d)\n",
 			    qid, ENA_TOTAL_NUM_QUEUES);
-		return;
+		return ENA_COM_INVAL;
 	}
 
 	io_sq = &ena_dev->io_sq_queues[qid];
 	io_cq = &ena_dev->io_cq_queues[qid];
 
-	ena_com_destroy_io_sq(ena_dev, io_sq);
-	ena_com_destroy_io_cq(ena_dev, io_cq);
+	ret = ena_com_destroy_io_sq(ena_dev, io_sq);
+	rc = ena_com_destroy_io_cq(ena_dev, io_cq);
+	if (ret == 0)
+		ret = rc;
 
 	ena_com_io_queue_free(ena_dev, io_sq, io_cq);
+
+	return ret;
 }
 
 int ena_com_get_link_params(struct ena_com_dev *ena_dev,

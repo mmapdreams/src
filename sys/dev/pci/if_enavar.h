@@ -171,6 +171,17 @@ struct ena_queue {
 	struct mutex		 eq_rx_mtx;
 
 	/*
+	 * RX clusters the device may still write into.  Once a completion
+	 * shows the ring accounting is broken (eq_rx_fault), nothing taken
+	 * off this ring is passed up or freed: it is parked here, with the
+	 * clusters still posted, until the device acknowledges a reset or
+	 * the destruction of the queue.  Only then is it safe to give the
+	 * memory back to the mbuf pool.  [eq_rx_mtx, or quiesced]
+	 */
+	struct mbuf_list	 eq_rx_held;
+	int			 eq_rx_fault;
+
+	/*
 	 * Per-queue kstat counters.  Monotonic for the life of the
 	 * device: created in ena_attach, destroyed in ena_detach, and
 	 * deliberately NOT reset by ena_up/ena_stop (unlike eq_tx_completions
@@ -236,6 +247,7 @@ struct ena_softc {
 	struct taskq		*sc_reset_tq;
 
 	int			 sc_up;		/* IFF_RUNNING shadow */
+	int			 sc_dev_quiesced; /* device reset acked, no IO queues */
 
 	/* Serialises the per-queue kstat read callbacks. */
 	struct mutex		 sc_kstat_mtx;
