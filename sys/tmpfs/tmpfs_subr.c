@@ -86,6 +86,7 @@
 #include <sys/systm.h>
 #include <sys/vnode.h>
 
+#include <uvm/uvm.h>
 #include <uvm/uvm_aobj.h>
 
 #include <tmpfs/tmpfs.h>
@@ -95,6 +96,13 @@
 /* Local functions. */
 void	tmpfs_dir_putseq(tmpfs_node_t *, tmpfs_dirent_t *);
 int	tmpfs_dir_getdotents(tmpfs_node_t *, struct dirent *, struct uio *);
+#ifdef __HAVE_PMAP_DIRECT
+int	tmpfs_uio_fetch(struct uvm_object *, voff_t, vm_prot_t,
+	    struct vm_page **);
+int	tmpfs_uio_wire(struct uvm_object *, voff_t, vm_prot_t,
+	    struct vm_page **, int *);
+void	tmpfs_uio_unwire(struct uvm_object *, struct vm_page **, int, int);
+#endif
 
 /*
  * tmpfs_alloc_node: allocate a new inode of a specified type and
@@ -1212,6 +1220,164 @@ tmpfs_uio_cache(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgptr)
 	node->tn_pgptr = pgptr;
 }
 
+#ifdef __HAVE_PMAP_DIRECT
+
+/*
+ * Copy through the direct map: wire the aobj pages behind the range, move
+ * the bytes via pmap_map_direct(), unwire. No kernel_map mapping is made,
+ * so no kernel fault, no deactivation and no TLB shootdown per call. The
+ * vnode lock excludes resize; the object lock serialises page lookup and
+ * wiring with the page daemon.
+ */
+#define TMPFS_UIO_BATCH		16
+
+/*
+ * tmpfs_uio_fetch: return the page at off, busy and owned by the caller.
+ * Blocks for a busy page, zero fills a never-written one and swaps in a
+ * paged-out one. The object is write locked on entry and on success.
+ */
+int
+tmpfs_uio_fetch(struct uvm_object *uobj, voff_t off, vm_prot_t access,
+    struct vm_page **pgp)
+{
+	struct vm_page *pg;
+	int npages, rv;
+
+	KASSERT(rw_write_held(uobj->vmobjlock));
+	for (;;) {
+		npages = 1;
+		pg = NULL;
+		/* Returns with the object unlocked. */
+		rv = uobj->pgops->pgo_get(uobj, off, &pg, &npages, 0, access,
+		    MADV_NORMAL, PGO_SYNCIO);
+		if (rv == VM_PAGER_OK)
+			break;
+		if (rv != VM_PAGER_AGAIN)
+			return EIO;
+		tsleep_nsec(&nowake, PVM, "tmpfsget", MSEC_TO_NSEC(5));
+		rw_enter(uobj->vmobjlock, RW_WRITE);
+	}
+	rw_enter(uobj->vmobjlock, RW_WRITE);
+	KASSERT(pg != NULL && (pg->pg_flags & PG_BUSY) != 0);
+	*pgp = pg;
+	return 0;
+}
+
+/*
+ * tmpfs_uio_wire: wire up to *npgsp consecutive pages from off into pgs.
+ * Stops early at a non-resident or busy page after the first; the first
+ * page is always fetched. On success *npgsp is the number wired (>= 1).
+ */
+int
+tmpfs_uio_wire(struct uvm_object *uobj, voff_t off, vm_prot_t access,
+    struct vm_page **pgs, int *npgsp)
+{
+	struct vm_page *pg;
+	int i, error;
+
+	rw_enter(uobj->vmobjlock, RW_WRITE);
+	for (i = 0; i < *npgsp; i++) {
+		pg = uvm_pagelookup(uobj, off + ptoa(i));
+		if (pg != NULL && (pg->pg_flags & PG_BUSY) == 0) {
+			uvm_pagewire(pg);
+			pgs[i] = pg;
+			continue;
+		}
+		if (i > 0)
+			break;
+		error = tmpfs_uio_fetch(uobj, off, access, &pg);
+		if (error) {
+			*npgsp = 0;
+			return error;
+		}
+		uvm_pagewire(pg);
+		if (pg->pg_flags & PG_WANTED)
+			wakeup(pg);
+		atomic_clearbits_int(&pg->pg_flags, PG_BUSY|PG_FAKE|PG_WANTED);
+		UVM_PAGE_OWN(pg, NULL);
+		pgs[i] = pg;
+	}
+	rw_exit(uobj->vmobjlock);
+	*npgsp = i;
+	return 0;
+}
+
+/*
+ * tmpfs_uio_unwire: unwire pgs; the first ndirty were written through the
+ * direct map, which leaves no pmap modified bit, so mark them dirty here.
+ */
+void
+tmpfs_uio_unwire(struct uvm_object *uobj, struct vm_page **pgs, int npgs,
+    int ndirty)
+{
+	int i;
+
+	rw_enter(uobj->vmobjlock, RW_WRITE);
+	for (i = 0; i < npgs; i++) {
+		if (i < ndirty)
+			atomic_clearbits_int(&pgs[i]->pg_flags, PG_CLEAN);
+		uvm_pageunwire(pgs[i]);
+	}
+	rw_exit(uobj->vmobjlock);
+}
+
+int
+tmpfs_uiomove(tmpfs_node_t *node, struct uio *uio, vsize_t len)
+{
+	struct uvm_object *uobj = node->tn_uobj;
+	struct vm_page *pgs[TMPFS_UIO_BATCH];
+	vm_prot_t access;
+	vsize_t pgoff, n;
+	int i, npgs, touched, error;
+
+	KASSERT(tmpfs_uio_cached(node) == 0);
+	access = uio->uio_rw == UIO_WRITE ? PROT_READ | PROT_WRITE : PROT_READ;
+	error = 0;
+	while (len > 0 && error == 0) {
+		pgoff = uio->uio_offset & PAGE_MASK;
+		npgs = MIN(howmany(pgoff + len, PAGE_SIZE), TMPFS_UIO_BATCH);
+		error = tmpfs_uio_wire(uobj, trunc_page(uio->uio_offset), access,
+		    pgs, &npgs);
+		if (error)
+			break;
+		touched = 0;
+		for (i = 0; i < npgs && len > 0; i++) {
+			pgoff = uio->uio_offset & PAGE_MASK;
+			n = MIN(len, PAGE_SIZE - pgoff);
+			touched++;
+			error = uiomove((char *)pmap_map_direct(pgs[i]) + pgoff,
+			    n, uio);
+			if (error)
+				break;
+			len -= n;
+		}
+		tmpfs_uio_unwire(uobj, pgs, npgs,
+		    uio->uio_rw == UIO_WRITE ? touched : 0);
+	}
+	return error;
+}
+
+int
+tmpfs_zeropg(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgoff)
+{
+	struct vm_page *pg;
+	int npgs, error;
+
+	KASSERT(tmpfs_uio_cached(node) == 0);
+
+	npgs = 1;
+	error = tmpfs_uio_wire(node->tn_uobj, pgnum, PROT_READ | PROT_WRITE,
+	    &pg, &npgs);
+	if (error)
+		return error;
+	memset((char *)pmap_map_direct(pg) + pgoff, 0, PAGE_SIZE - pgoff);
+	tmpfs_uio_unwire(node->tn_uobj, &pg, 1, 1);
+
+	return 0;
+}
+
+#else /* !__HAVE_PMAP_DIRECT */
+
 /*
  * Be gentle to kernel_map, don't allow more than 4MB in a single transaction.
  */
@@ -1287,3 +1453,5 @@ tmpfs_zeropg(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgoff)
 
 	return 0;
 }
+
+#endif /* __HAVE_PMAP_DIRECT */
