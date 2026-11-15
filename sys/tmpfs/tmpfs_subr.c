@@ -93,10 +93,18 @@
 #include <tmpfs/tmpfs_vnops.h>
 
 
+/*
+ * Copy file data through the direct map where one exists and physical
+ * aliases need no cache maintenance (uvm_pagermapin makes the same choice).
+ */
+#if defined(__HAVE_PMAP_DIRECT) && !defined(PMAP_PREFER)
+#define TMPFS_UIO_DIRECT
+#endif
+
 /* Local functions. */
 void	tmpfs_dir_putseq(tmpfs_node_t *, tmpfs_dirent_t *);
 int	tmpfs_dir_getdotents(tmpfs_node_t *, struct dirent *, struct uio *);
-#ifdef __HAVE_PMAP_DIRECT
+#ifdef TMPFS_UIO_DIRECT
 int	tmpfs_uio_fetch(struct uvm_object *, voff_t, vm_prot_t,
 	    struct vm_page **);
 int	tmpfs_uio_wire(struct uvm_object *, voff_t, vm_prot_t,
@@ -1220,7 +1228,7 @@ tmpfs_uio_cache(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgptr)
 	node->tn_pgptr = pgptr;
 }
 
-#ifdef __HAVE_PMAP_DIRECT
+#ifdef TMPFS_UIO_DIRECT
 
 /*
  * Copy through the direct map: wire the aobj pages behind the range, move
@@ -1328,6 +1336,7 @@ tmpfs_uiomove(tmpfs_node_t *node, struct uio *uio, vsize_t len)
 	struct vm_page *pgs[TMPFS_UIO_BATCH];
 	vm_prot_t access;
 	vsize_t pgoff, n;
+	vaddr_t va;
 	int i, npgs, touched, error;
 
 	KASSERT(tmpfs_uio_cached(node) == 0);
@@ -1345,8 +1354,9 @@ tmpfs_uiomove(tmpfs_node_t *node, struct uio *uio, vsize_t len)
 			pgoff = uio->uio_offset & PAGE_MASK;
 			n = MIN(len, PAGE_SIZE - pgoff);
 			touched++;
-			error = uiomove((char *)pmap_map_direct(pgs[i]) + pgoff,
-			    n, uio);
+			va = pmap_map_direct(pgs[i]);
+			error = uiomove((char *)va + pgoff, n, uio);
+			pmap_unmap_direct(va);
 			if (error)
 				break;
 			len -= n;
@@ -1361,6 +1371,7 @@ int
 tmpfs_zeropg(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgoff)
 {
 	struct vm_page *pg;
+	vaddr_t va;
 	int npgs, error;
 
 	KASSERT(tmpfs_uio_cached(node) == 0);
@@ -1370,13 +1381,15 @@ tmpfs_zeropg(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgoff)
 	    &pg, &npgs);
 	if (error)
 		return error;
-	memset((char *)pmap_map_direct(pg) + pgoff, 0, PAGE_SIZE - pgoff);
+	va = pmap_map_direct(pg);
+	memset((char *)va + pgoff, 0, PAGE_SIZE - pgoff);
+	pmap_unmap_direct(va);
 	tmpfs_uio_unwire(node->tn_uobj, &pg, 1, 1);
 
 	return 0;
 }
 
-#else /* !__HAVE_PMAP_DIRECT */
+#else /* !TMPFS_UIO_DIRECT */
 
 /*
  * Be gentle to kernel_map, don't allow more than 4MB in a single transaction.
@@ -1454,4 +1467,4 @@ tmpfs_zeropg(tmpfs_node_t *node, voff_t pgnum, vaddr_t pgoff)
 	return 0;
 }
 
-#endif /* __HAVE_PMAP_DIRECT */
+#endif /* TMPFS_UIO_DIRECT */
